@@ -1,0 +1,56 @@
+{
+  "entities": {
+    "Diagnosis": {
+      "title": "Diagnosis",
+      "description": "C.A.G.E. Audit Diagnosis Result",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "handle": { "type": "string", "maxLength": 100 },
+        "niche": { "type": "string", "maxLength": 100 },
+        "overallScore": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "handle", "overallScore"]
+    },
+    "StartProject": {
+      "title": "StartProject",
+      "description": "Começar do Zero Project Data",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "niche": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId"]
+    },
+    "DigitalTwin": {
+      "title": "DigitalTwin",
+      "description": "Digital Twin Profile and Metrics",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "handle": { "type": "string", "maxLength": 100 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "handle"]
+    }
+  },
+  "firestore": {
+    "/diagnoses/{diagnosisId}": {
+      "schema": { "$ref": "#/entities/Diagnosis" },
+      "description": "Collection storing C.A.G.E. audits"
+    },
+    "/start_projects/{projectId}": {
+      "schema": { "$ref": "#/entities/StartProject" },
+      "description": "Collection storing Start Mode projects"
+    },
+    "/digital_twins/{twinId}": {
+      "schema": { "$ref": "#/entities/DigitalTwin" },
+      "description": "Collection storing Digital Twin states"
+    }
+  }
+}

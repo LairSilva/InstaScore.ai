@@ -1,0 +1,44 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Diagnoses collection
+    match /diagnoses/{diagnosisId} {
+      allow read: if isValidId(diagnosisId) && (resource == null || resource.data.userId == request.auth.uid || resource.data.userId == "anonymous");
+      allow create: if isValidId(diagnosisId) && (request.resource.data.userId == request.auth.uid || request.resource.data.userId == "anonymous");
+      allow update, delete: if isValidId(diagnosisId) && isSignedIn() && (resource.data.userId == request.auth.uid);
+    }
+
+    // Start Projects collection
+    match /start_projects/{projectId} {
+      allow read: if isValidId(projectId) && (resource == null || resource.data.userId == request.auth.uid || resource.data.userId == "anonymous");
+      allow create: if isValidId(projectId) && (request.resource.data.userId == request.auth.uid || request.resource.data.userId == "anonymous");
+      allow update, delete: if isValidId(projectId) && isSignedIn() && (resource.data.userId == request.auth.uid);
+    }
+
+    // Digital Twins collection
+    match /digital_twins/{twinId} {
+      allow read: if isValidId(twinId) && (resource == null || resource.data.userId == request.auth.uid || resource.data.userId == "anonymous");
+      allow create, update: if isValidId(twinId) && (request.resource.data.userId == request.auth.uid || request.resource.data.userId == "anonymous");
+      allow delete: if isValidId(twinId) && isSignedIn() && (resource.data.userId == request.auth.uid);
+    }
+  }
+}
