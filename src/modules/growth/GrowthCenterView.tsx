@@ -2,14 +2,15 @@ import React from "react";
 import { motion } from "motion/react";
 import { CheckCircle, Circle, Rocket, Calendar, Target, Zap, ArrowRight, LayoutTemplate } from "lucide-react";
 import { AnalysisResponse } from "../../types";
-import { DigitalTwin } from "../../core/DigitalTwin";
+import { DigitalTwin, createDefaultDigitalTwin } from "../../core/DigitalTwin";
 
 interface GrowthCenterViewProps {
   diagnosisResult: AnalysisResponse;
-  digitalTwin: DigitalTwin;
+  digitalTwin?: DigitalTwin | null;
 }
 
-export function GrowthCenterView({ diagnosisResult, digitalTwin }: GrowthCenterViewProps) {
+export function GrowthCenterView({ diagnosisResult, digitalTwin: rawTwin }: GrowthCenterViewProps) {
+  const digitalTwin = rawTwin || createDefaultDigitalTwin(diagnosisResult);
   const { diagnosis } = diagnosisResult;
   
   return (
@@ -24,7 +25,7 @@ export function GrowthCenterView({ diagnosisResult, digitalTwin }: GrowthCenterV
           <Rocket size={14} /> Execution Engine
         </div>
         <h1 className="text-3xl font-extrabold text-white tracking-tight">O que executar agora</h1>
-        <p className="text-slate-400">Tarefas adaptáveis que evoluem conforme o seu Execution Score (Atual: {digitalTwin.metrics.executionScore}).</p>
+        <p className="text-slate-400">Tarefas adaptáveis que evoluem conforme o seu Execution Score (Atual: {digitalTwin.metrics?.executionScore || 50}).</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

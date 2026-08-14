@@ -2,31 +2,65 @@ import React, { useState } from "react";
 import { motion } from "motion/react";
 import { Sparkles, Save, CheckCircle, ArrowRight, Zap, Target, TrendingUp } from "lucide-react";
 import { AnalysisResponse } from "../../types";
-import { DigitalTwin } from "../../core/DigitalTwin";
+import { DigitalTwin, createDefaultDigitalTwin } from "../../core/DigitalTwin";
 import { PredictionEngine, PredictionResult } from "../../engine/prediction/PredictionEngine";
 
 interface SimulatorViewProps {
   diagnosisResult: AnalysisResponse;
   currentScore: number;
-  digitalTwin: DigitalTwin;
+  digitalTwin?: DigitalTwin | null;
 }
 
-export function SimulatorView({ diagnosisResult, currentScore, digitalTwin }: SimulatorViewProps) {
-  const [bio, setBio] = useState(digitalTwin.content.currentBio || "Designer gráfico ajudando marcas a crescerem.");
-  const [cta, setCta] = useState(digitalTwin.content.currentCta || "Link abaixo");
+export function SimulatorView({ diagnosisResult, currentScore, digitalTwin: rawTwin }: SimulatorViewProps) {
+  const digitalTwin = rawTwin || createDefaultDigitalTwin(diagnosisResult);
+  const [bio, setBio] = useState(digitalTwin.content?.currentBio || "Designer gráfico ajudando marcas a crescerem.");
+  const [cta, setCta] = useState(digitalTwin.content?.currentCta || "Link abaixo");
   const [simulating, setSimulating] = useState(false);
+  const [optimizingAi, setOptimizingAi] = useState(false);
+  const [aiRationale, setAiRationale] = useState<string | null>(null);
   
   const [prediction, setPrediction] = useState<PredictionResult | null>(null);
 
   const handleSimulate = () => {
     setSimulating(true);
     setTimeout(() => {
-      // Prediction Engine Mock based on Digital Twin context
-      // Integrando Módulo 3: Prediction Engine Real
+      // Prediction Engine Real based on Digital Twin context
       const predicted = PredictionEngine.predictImpact(digitalTwin, "Bio");
       setPrediction(predicted);
       setSimulating(false);
-    }, 1500);
+    }, 1200);
+  };
+
+  const handleOptimizeWithAi = async () => {
+    setOptimizingAi(true);
+    setAiRationale(null);
+    try {
+      const res = await fetch("/api/simulator/optimize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          currentBio: bio,
+          currentCta: cta,
+          niche: diagnosisResult?.scoring?.categories?.["positioning"]?.name || "Estratégico",
+          objective: "Aumentar conversão no link da bio"
+        })
+      });
+
+      const data = await res.json();
+      if (data.success && data.bios && data.bios.length > 0) {
+        setBio(data.bios[0]);
+        if (data.ctas && data.ctas.length > 0) {
+          setCta(data.ctas[0]);
+        }
+        if (data.rationale) {
+          setAiRationale(data.rationale);
+        }
+      }
+    } catch (err) {
+      console.warn("[Simulator AI Optimize Error]", err);
+    } finally {
+      setOptimizingAi(false);
+    }
   };
 
   return (
@@ -71,6 +105,32 @@ export function SimulatorView({ diagnosisResult, currentScore, digitalTwin }: Si
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-slate-200 text-sm focus:border-violet-500 focus:outline-none transition-colors"
               />
             </div>
+            
+            <div className="flex gap-2">
+              <button 
+                type="button"
+                onClick={handleOptimizeWithAi}
+                disabled={optimizingAi}
+                className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-violet-300 font-semibold rounded-xl text-xs transition-colors flex items-center justify-center gap-2 border border-violet-500/20 disabled:opacity-50"
+              >
+                {optimizingAi ? (
+                  <>
+                    <div className="w-3.5 h-3.5 rounded-full border-2 border-violet-400 border-t-transparent animate-spin"></div>
+                    Gerando sugestões com IA...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={14} className="text-violet-400" /> Otimizar Bio & CTA com IA
+                  </>
+                )}
+              </button>
+            </div>
+
+            {aiRationale && (
+              <div className="p-3 rounded-xl bg-violet-950/30 border border-violet-800/30 text-xs text-violet-300 leading-relaxed">
+                <span className="font-bold text-violet-200">Justificativa IA:</span> {aiRationale}
+              </div>
+            )}
             
             <button 
               onClick={handleSimulate}

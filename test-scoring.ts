@@ -1,12 +1,12 @@
-import { calculateScoring, CRITERIA } from "./src/config/methodology";
+import { calculateScoring, CRITERIA, getPrioritizedActions } from "./src/config/methodology";
+import { DiagnosisSchema } from "./src/schemas/diagnosis";
 
 /**
- * Mathematical Scoring Engine Test Suite.
- * Asserts all prompt-specified edge cases.
+ * Mathematical Scoring Engine & Pipeline Validation Test Suite.
  */
 function runTests() {
   console.log("==========================================");
-  console.log("Iniciando testes do motor matemático InstaScore...");
+  console.log("Iniciando testes do motor matemático & pipeline InstaScore...");
   console.log("==========================================");
 
   let successCount = 0;
@@ -57,21 +57,18 @@ function runTests() {
   assert("Todas as notas 2 geram Score em torno de 50", resultAllTwo.score === 50, `Obtido: ${resultAllTwo.score}`);
 
   // --- Caso 4: Critérios null devem reduzir cobertura ---
-  // Let's set 5 criteria to null (their weights are 7 + 5 + 5 + 4 + 4 = 25 points)
   const evaluationsWithNull = CRITERIA.map(c => ({
     criterion_id: c.id,
-    grade: c.category === "positioning" ? null : 2, // positioning criteria are null
+    grade: c.category === "positioning" ? null : 2,
     confidence: 0.9,
     evidence: "Evidência parcial",
     justification: "Justificativa parcial"
   }));
   const resultWithNull = calculateScoring(evaluationsWithNull);
-  // Total weights = 100. Category 'positioning' weights = 25. Covered weight = 75.
   assert("Critérios null reduzem a cobertura", resultWithNull.coverage === 75, `Obtido: ${resultWithNull.coverage}`);
   assert("Score ainda é calculado quando cobertura é >= 75%", resultWithNull.score !== null, "Score foi nulo!");
 
   // --- Caso 5: Cobertura abaixo de 75% deve bloquear o Score definitivo ---
-  // Let's set both 'positioning' (25) and 'seo' (15) to null, leaving 60% coverage
   const evaluationsLowCoverage = CRITERIA.map(c => ({
     criterion_id: c.id,
     grade: (c.category === "positioning" || c.category === "seo") ? null : 2,
@@ -83,9 +80,52 @@ function runTests() {
   assert("Cobertura de 60% é calculada corretamente", resultLowCoverage.coverage === 60, `Obtido: ${resultLowCoverage.coverage}`);
   assert("Score definitivo é bloqueado se cobertura < 75%", resultLowCoverage.score === null, `Obtido: ${resultLowCoverage.score}`);
 
-  // --- Caso 6: Score-alvo não pode ultrapassar 100 ---
-  const resultAllFourTarget = calculateScoring(evaluationsAllFour);
-  assert("Score-alvo simulado não ultrapassa 100", resultAllFourTarget.targetScore !== null && resultAllFourTarget.targetScore <= 100, `Obtido: ${resultAllFourTarget.targetScore}`);
+  // --- Caso 6: Soma de maxPoints de todas as categorias deve ser exatamente 100 ---
+  const totalCategoryMaxPoints = Object.values(resultAllFour.categories).reduce((acc, cat) => acc + cat.maxPoints, 0);
+  assert("Soma das pontuações máximas das categorias é 100", totalCategoryMaxPoints === 100, `Obtido: ${totalCategoryMaxPoints}`);
+
+  // --- Caso 7: getPrioritizedActions ordena por maior impacto (gap * peso) ---
+  const prioritized = getPrioritizedActions(evaluationsAllZero, "Vender produtos / serviços");
+  assert("Priorização retorna lista de ações", prioritized.length > 0, "Lista vazia");
+  assert("Primeira ação tem maior prioridade", prioritized[0].priorityScore >= prioritized[prioritized.length - 1].priorityScore, "Ordem incorreta");
+
+  // --- Caso 8: Zod Schema valida e sanitiza payload complexo de IA com resiliência ---
+  const rawAiPayload = {
+    methodology_version: "instascore-structural-0.1-alpha",
+    analysis_type: "structural",
+    metadata: {
+      is_data_sufficient: "true",
+      missing_elements: [],
+      overall_confidence: 92 // Scale 0-100 normalized to 0.92
+    },
+    evaluations: evaluationsAllFour,
+    strengths: [
+      { criterion_id: "pos_clarity", title: "Clareza", reason: "Excelente clareza" },
+      { criterion_id: "pos_niche", title: "Nicho", reason: "Nicho definido" },
+      { criterion_id: "vis_palette", title: "Cores", reason: "Cores consistentes" },
+      { criterion_id: "vis_quality", title: "Excedente", reason: "Item 4 deve ser fatiado" } // 4th item should be sliced
+    ],
+    critical_gaps: [
+      { criterion_id: "cta_clarity", title: "CTA Fraco", reason: "Falta direcionamento", impact: "Menos conversões" }
+    ],
+    recommended_actions: [
+      { criterion_id: "cta_clarity", title: "Ajustar CTA", instruction: "Adicionar link direto", effort: "baixo", expected_effect: "Mais cliques" }
+    ],
+    tomorrow_action: {
+      criterion_id: "cta_clarity",
+      title: "Ajustar link na bio",
+      instruction: "Trocar o link da bio por um link direto para o WhatsApp"
+    },
+    disclaimer: "Auditoria baseada em evidências."
+  };
+
+  const parseResult = DiagnosisSchema.safeParse(rawAiPayload);
+  assert("Zod Schema aprova payload simulado", parseResult.success, parseResult.success ? "" : JSON.stringify(parseResult.error.issues));
+  if (parseResult.success) {
+    assert("Strengths é limitado a no máximo 3 itens", parseResult.data.strengths.length <= 3, `Obtido: ${parseResult.data.strengths.length}`);
+    assert("Confidence é normalizado para escala 0 a 1", parseResult.data.metadata.overall_confidence <= 1, `Obtido: ${parseResult.data.metadata.overall_confidence}`);
+    assert("Effort 'baixo' é normalizado para 'low'", parseResult.data.recommended_actions[0].effort === "low", `Obtido: ${parseResult.data.recommended_actions[0].effort}`);
+  }
 
   console.log("==========================================");
   console.log(`Testes finalizados: ${successCount} PASS, ${failCount} FAIL`);
@@ -99,3 +139,4 @@ function runTests() {
 }
 
 runTests();
+

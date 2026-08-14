@@ -71,17 +71,20 @@ export class GlobalIntelligenceEngine {
   } {
     const benchmark = this.getBenchmarkForNiche(twin.identity.niche);
     
+    const overallScore = twin?.metrics?.overallScore || 50;
+    const conversionVelocity = twin?.metrics?.conversionVelocity || 40;
+
     let status: "ABOVE_AVERAGE" | "BELOW_AVERAGE" | "TOP_PERFORMER" = "BELOW_AVERAGE";
-    if (twin.metrics.overallScore >= benchmark.topPercentileScore) {
+    if (overallScore >= benchmark.topPercentileScore) {
       status = "TOP_PERFORMER";
-    } else if (twin.metrics.overallScore >= benchmark.averageScore) {
+    } else if (overallScore >= benchmark.averageScore) {
       status = "ABOVE_AVERAGE";
     }
 
-    const gapToTop = Math.max(0, benchmark.topPercentileScore - twin.metrics.overallScore);
+    const gapToTop = Math.max(0, benchmark.topPercentileScore - overallScore);
 
     // Módulo 4: Extração de padrões baseados na falha de consistência ou conversão
-    const recommendedPatternToAdopt = twin.metrics.conversionVelocity < benchmark.averageConversionVelocity 
+    const recommendedPatternToAdopt = conversionVelocity < benchmark.averageConversionVelocity 
       ? benchmark.winningPatterns[1] // Foco em CTAs
       : benchmark.winningPatterns[0];  // Foco em engajamento topo de funil
 

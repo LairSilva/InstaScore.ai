@@ -96,7 +96,7 @@ export default function LandingViewV7({ onStartOnboarding, onStartFromScratch, o
           {/* Micro Trust Stats */}
           <div className="pt-4 flex flex-wrap items-center justify-center lg:justify-start gap-6 text-xs text-slate-400 font-mono">
             <span className="flex items-center gap-1.5 text-emerald-400">
-              <ShieldCheck size={16} /> 100% Gratuito & Seguro
+              <ShieldCheck size={16} /> 1 Diagnóstico Gratuito
             </span>
             <span className="flex items-center gap-1.5 text-slate-300">
               <Zap size={16} className="text-[#FF5E36]" /> Análise em 90 segundos
@@ -894,7 +894,7 @@ export default function LandingViewV7({ onStartOnboarding, onStartFromScratch, o
         
         <div className="max-w-2xl mx-auto space-y-4">
           <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white/10 text-white border border-white/20 text-xs font-mono font-bold">
-            <Sparkles size={14} className="text-[#FF5E36]" /> DIAGNÓSTICO INSTANTÂNEO & GRATUITO
+            <Sparkles size={14} className="text-[#FF5E36]" /> 1º DIAGNÓSTICO GRATUITO
           </div>
 
           <h2 className="text-3xl sm:text-4xl md:text-5xl font-black text-white font-display leading-tight">
@@ -912,12 +912,12 @@ export default function LandingViewV7({ onStartOnboarding, onStartFromScratch, o
               onClick={onStartOnboarding}
               className="px-10 py-4 bg-gradient-to-r from-[#FF5E36] via-[#E1306C] to-[#833AB4] hover:opacity-95 text-white font-bold rounded-2xl text-lg shadow-[0_0_40px_rgba(225,48,108,0.5)] transition-all flex items-center justify-center gap-3 cursor-pointer min-h-[56px] active:scale-98"
             >
-              Começar diagnóstico gratuito <ArrowRight size={22} />
+              Começar 1º diagnóstico gratuito <ArrowRight size={22} />
             </button>
           </div>
 
           <p className="text-xs text-slate-400 font-mono pt-2">
-            Não requer senhas • Seguro • Resultado gerado em tempo real
+            1 diagnóstico gratuito • Sem cartão de crédito • Recursos PRO disponíveis
           </p>
         </div>
 

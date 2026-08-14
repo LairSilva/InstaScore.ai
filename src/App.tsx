@@ -36,13 +36,14 @@ import {
   saveDigitalTwinToFirestore,
   testFirebaseConnection 
 } from "./lib/firebase";
+import { initGA, trackPageView } from "./lib/analytics";
 
 import { CATEGORIES, CRITERIA, CategoryResult } from "./config/methodology";
 import { DEMO_DIAGNOSIS, DEMO_SCORING } from "./data/demo-diagnosis";
 import { OnboardingData, AnalysisResponse } from "./types";
 import { ResultView } from "./components/ResultView";
 import { OSLayout } from "./layouts/OSLayout";
-import { DigitalTwin, GrowthScores } from "./core/DigitalTwin";
+import { DigitalTwin, GrowthScores, createDefaultDigitalTwin } from "./core/DigitalTwin";
 import { GrowthEngine } from "./core/GrowthEngine";
 import { GrowthCenterView } from "./modules/growth/GrowthCenterView";
 import { SimulatorView } from "./modules/simulator/SimulatorView";
@@ -50,11 +51,27 @@ import { MentorView } from "./modules/mentor/MentorView";
 import { GlobalBenchmarkView } from "./modules/benchmark/GlobalBenchmarkView";
 import { DigitalTwinView } from "./modules/twin/DigitalTwinView";
 import { TimelineView } from "./modules/history/TimelineView";
+import { PaywallModal } from "./components/PaywallModal";
+import { MyPlanView } from "./components/MyPlanView";
+import { ProContentGenerator } from "./components/ProContentGenerator";
+import { useEntitlements } from "./hooks/useEntitlements";
+import { Crown, CreditCard } from "lucide-react";
 
 export default function App() {
   // Navigation View State
-  // "landing" | "onboarding" | "processing" | "result" | "start-onboarding" | "start-result"
-  const [view, setView] = useState<"landing" | "onboarding" | "processing" | "result" | "start-onboarding" | "start-result">("landing");
+  const [view, setView] = useState<"landing" | "onboarding" | "processing" | "result" | "start-onboarding" | "start-result" | "my-plan">("landing");
+
+  // Commercial entitlements hook
+  const {
+    userId,
+    isPro,
+    planConfig,
+    isPaywallOpen,
+    paywallReason,
+    openPaywall,
+    closePaywall,
+    refreshStatus
+  } = useEntitlements();
 
   // Start Mode Result Data State
   const [startModeResult, setStartModeResult] = useState<StartModeResult | null>(null);
@@ -88,6 +105,15 @@ export default function App() {
   const [diagnosisResult, setDiagnosisResult] = useState<AnalysisResponse | null>(null);
   const [digitalTwin, setDigitalTwin] = useState<DigitalTwin | null>(null);
   const [isDemoMode, setIsDemoMode] = useState(false);
+
+  // Synchronous fallback / derived active DigitalTwin to guarantee never null during rendering
+  const activeDigitalTwin = React.useMemo(() => {
+    if (digitalTwin) return digitalTwin;
+    if (diagnosisResult) {
+      return createDefaultDigitalTwin(diagnosisResult, userName, handle, niche, objective, targetAudience);
+    }
+    return null;
+  }, [digitalTwin, diagnosisResult, userName, handle, niche, objective, targetAudience]);
 
   // Modal Share Controller
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
@@ -297,10 +323,11 @@ export default function App() {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       controller.abort();
-    }, 90000); // 90 seconds timeout
+    }, 120000); // 120 seconds timeout for AI multimodal analysis
 
     try {
-      const payload: OnboardingData = {
+      const payload: OnboardingData & { userId: string } = {
+        userId,
         userName,
         niche,
         objective,
@@ -319,6 +346,7 @@ export default function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "x-user-id": userId
         },
         body: JSON.stringify(payload),
         signal: controller.signal,
@@ -342,6 +370,13 @@ export default function App() {
         throw new Error(readErr.message || "Falha ao ler resposta do servidor.");
       }
 
+      if (data.paywallRequired || data.error === "FREE_QUOTA_EXCEEDED") {
+        setView("onboarding");
+        setOnboardingStep(10);
+        openPaywall(data.message || "Você atingiu o limite de 1 diagnóstico gratuito no plano Free. Faça upgrade para o InstaScore PRO para realizar mais análises.");
+        return;
+      }
+
       if (!response.ok || !data.success) {
         throw new Error(data.message || data.error || `Falha na análise. Código HTTP ${response.status}`);
       }
@@ -359,8 +394,8 @@ export default function App() {
       console.error("Diagnosis Submission Error:", err);
       
       setAnalysisStatus("error");
-      if (err.name === "AbortError") {
-        setErrorText("A análise demorou mais que o esperado. Seus dados não foram perdidos. Tente novamente.");
+      if (err.name === "AbortError" || err.message?.toLowerCase().includes("aborted")) {
+        setErrorText("A análise demorou mais que o esperado (tempo limite esgotado). Por favor, tente novamente.");
       } else {
         setErrorText(err.message || "Erro de conexão com o servidor. Verifique os dados e tente novamente.");
       }
@@ -373,8 +408,9 @@ export default function App() {
       const score = diagnosisResult.scoring.score || 0;
       const cats = diagnosisResult.scoring.categories || {};
       
+      const cleanHandle = (handle || "usuario").replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
       const twin: DigitalTwin = {
-        id: "twin-" + (handle || "usuario"),
+        id: "twin-" + (cleanHandle || "usuario"),
         handle: handle || "usuario",
         identity: {
           niche: niche || "Geral",
@@ -422,13 +458,75 @@ export default function App() {
     }
   }, [diagnosisResult, userName, handle, niche, objective, targetAudience]);
 
-  // Test Firebase connection on mount
+  // Initialize Google Analytics & test Firebase connection on mount, and restore saved state if available
   useEffect(() => {
+    initGA();
     testFirebaseConnection().catch(err => console.warn('[Firebase] Connection test warning:', err));
+
+    try {
+      const savedDiag = localStorage.getItem("instascore_last_diagnosis");
+      const savedStart = localStorage.getItem("instascore_last_start_result");
+      const savedUser = localStorage.getItem("instascore_last_user_name");
+      const savedHandle = localStorage.getItem("instascore_last_handle");
+      if (savedDiag) {
+        const parsed = JSON.parse(savedDiag);
+        if (parsed?.diagnosis && parsed?.scoring) {
+          setDiagnosisResult(parsed);
+          if (savedUser) setUserName(savedUser);
+          if (savedHandle) setHandle(savedHandle);
+          setView("result");
+        }
+      } else if (savedStart) {
+        const parsed = JSON.parse(savedStart);
+        if (parsed?.startScore) {
+          setStartModeResult(parsed);
+          setView("start-result");
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to restore state from localStorage", e);
+    }
   }, []);
+
+  // Save diagnosis to localStorage when updated
+  useEffect(() => {
+    if (diagnosisResult && !isDemoMode) {
+      try {
+        localStorage.setItem("instascore_last_diagnosis", JSON.stringify(diagnosisResult));
+        if (userName) localStorage.setItem("instascore_last_user_name", userName);
+        if (handle) localStorage.setItem("instascore_last_handle", handle);
+      } catch (e) {
+        console.warn("Failed to save diagnosis to localStorage", e);
+      }
+    }
+  }, [diagnosisResult, isDemoMode, userName, handle]);
+
+  // Save start mode result to localStorage when updated
+  useEffect(() => {
+    if (startModeResult) {
+      try {
+        localStorage.setItem("instascore_last_start_result", JSON.stringify(startModeResult));
+      } catch (e) {
+        console.warn("Failed to save start mode result to localStorage", e);
+      }
+    }
+  }, [startModeResult]);
+
+  // Track page view changes in GA
+  useEffect(() => {
+    trackPageView(`/${view}`, `Screen: ${view}`);
+  }, [view]);
 
   // Reset diagnosis
   const handleReset = () => {
+    try {
+      localStorage.removeItem("instascore_last_diagnosis");
+      localStorage.removeItem("instascore_last_start_result");
+      localStorage.removeItem("instascore_last_user_name");
+      localStorage.removeItem("instascore_last_handle");
+    } catch (e) {
+      // ignore
+    }
     setUserName("");
     setNiche("");
     setObjective("");
@@ -441,8 +539,9 @@ export default function App() {
     setConsent(false);
     setErrorText(null);
     setDiagnosisResult(null);
-    setIsDemoMode(false);
+    setStartModeResult(null);
     setAnalysisStatus("idle");
+    setIsDemoMode(false);
     setOnboardingStep(1);
     setView("landing");
   };
@@ -476,9 +575,41 @@ export default function App() {
             <BrandLogo iconSize={36} textSize="md" />
           </div>
 
-          <div className="flex items-center gap-3">
-            <span className="text-xs font-semibold px-3.5 py-1.5 rounded-full bg-gradient-to-r from-[#FF5E36]/15 via-[#E1306C]/15 to-[#833AB4]/15 text-[#FA26A0] border border-[#E1306C]/30 select-none shadow-[0_0_15px_rgba(225,48,108,0.2)]">
-              Versão V6 • OS
+          <div className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setView("my-plan")}
+              className={`text-xs font-semibold px-3 py-1.5 rounded-xl border flex items-center gap-1.5 transition-all cursor-pointer ${
+                isPro
+                  ? "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20"
+                  : "bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800"
+              }`}
+            >
+              {isPro ? (
+                <>
+                  <Crown className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Pro</span>
+                </>
+              ) : (
+                <>
+                  <CreditCard className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Meu Plano (Free)</span>
+                </>
+              )}
+            </button>
+
+            {!isPro && (
+              <button
+                type="button"
+                onClick={() => openPaywall()}
+                className="text-xs font-semibold px-3 py-1.5 rounded-xl bg-gradient-to-r from-indigo-500 to-emerald-500 text-white shadow-sm hover:brightness-110 transition-all cursor-pointer hidden sm:flex items-center gap-1"
+              >
+                <span>Upgrade Pro</span>
+              </button>
+            )}
+
+            <span className="text-xs font-semibold px-3 py-1.5 rounded-full bg-gradient-to-r from-[#FF5E36]/15 via-[#E1306C]/15 to-[#833AB4]/15 text-[#FA26A0] border border-[#E1306C]/30 select-none shadow-[0_0_15px_rgba(225,48,108,0.2)] hidden sm:inline-block">
+              V11 Commercial
             </span>
             {view === "result" && (
               <button
@@ -998,7 +1129,8 @@ export default function App() {
               onNavigate={setActiveOsModule}
             >
               {activeOsModule === "dashboard" && (
-                <ResultView digitalTwin={digitalTwin!}
+                <ResultView 
+                  digitalTwin={activeDigitalTwin}
                   diagnosisResult={diagnosisResult}
                   isDemoMode={isDemoMode}
                   userName={userName}
@@ -1010,34 +1142,37 @@ export default function App() {
               )}
               {activeOsModule === "benchmark" && (
                 <GlobalBenchmarkView
-                  digitalTwin={digitalTwin!}
+                  digitalTwin={activeDigitalTwin}
                 />
               )}
               {activeOsModule === "twin" && (
                 <DigitalTwinView
-                  digitalTwin={digitalTwin!}
+                  digitalTwin={activeDigitalTwin}
                 />
               )}
               {activeOsModule === "simulator" && (
                 <SimulatorView 
-                  digitalTwin={digitalTwin!}
+                  digitalTwin={activeDigitalTwin}
                   diagnosisResult={diagnosisResult}
                   currentScore={diagnosisResult.scoring.score || 0}
                 />
               )}
               {activeOsModule === "growth" && (
-                <GrowthCenterView diagnosisResult={diagnosisResult} digitalTwin={digitalTwin!} />
+                <GrowthCenterView 
+                  diagnosisResult={diagnosisResult} 
+                  digitalTwin={activeDigitalTwin} 
+                />
               )}
               {activeOsModule === "mentor" && (
                 <MentorView 
-                  digitalTwin={digitalTwin!}
+                  digitalTwin={activeDigitalTwin}
                   diagnosisResult={diagnosisResult}
                   userName={userName}
                 />
               )}
               {activeOsModule === "history" && (
                 <TimelineView 
-                  digitalTwin={digitalTwin!}
+                  digitalTwin={activeDigitalTwin}
                   diagnosisResult={diagnosisResult}
                   currentScore={diagnosisResult.scoring.score || 0}
                 />
@@ -1045,7 +1180,32 @@ export default function App() {
             </OSLayout>
           </div>
         )}
+
+        {/* VIEW 5: MY PLAN VIEW */}
+        {view === "my-plan" && (
+          <MyPlanView
+            onOpenPaywall={() => openPaywall()}
+            onBack={() => {
+              if (diagnosisResult) {
+                setView("result");
+              } else {
+                setView("landing");
+              }
+            }}
+          />
+        )}
       </main>
+
+      {/* Paywall Modal */}
+      <PaywallModal
+        isOpen={isPaywallOpen}
+        onClose={closePaywall}
+        userId={userId}
+        reason={paywallReason}
+        onSuccess={() => {
+          refreshStatus();
+        }}
+      />
 
       {/* 3. Footer (Universal) */}
       <footer id="app-global-footer" className="border-t border-slate-900/60 py-6 bg-slate-950 text-center select-none">

@@ -21,6 +21,12 @@ export function validateImageFile(file: File): { valid: boolean; error?: string 
       error: "Formato de arquivo não suportado. Envie apenas JPG, JPEG, PNG ou WebP."
     };
   }
+  if (file.size > 15 * 1024 * 1024) {
+    return {
+      valid: false,
+      error: "O arquivo excede o tamanho máximo de 15MB."
+    };
+  }
   return { valid: true };
 }
 
@@ -41,11 +47,15 @@ export function compressImage(file: File): Promise<ProcessedImage> {
 
         const maxDimension = 1600;
 
-        // Resize if exceeding max width
-        if (width > maxDimension) {
-          const ratio = maxDimension / width;
-          width = maxDimension;
-          height = Math.round(height * ratio);
+        // Resize if exceeding max dimension in either width or height
+        if (width > maxDimension || height > maxDimension) {
+          if (width >= height) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          } else {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
         }
 
         canvas.width = width;

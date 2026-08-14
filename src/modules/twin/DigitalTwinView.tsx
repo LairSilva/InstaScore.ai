@@ -1,13 +1,14 @@
 import React from "react";
 import { motion } from "motion/react";
-import { DigitalTwin } from "../../core/DigitalTwin";
+import { DigitalTwin, createDefaultDigitalTwin } from "../../core/DigitalTwin";
 import { Fingerprint, Target, Users, Megaphone, Palette, Clock, Repeat, LayoutGrid, PlaySquare, LineChart, Shield, History, Brain } from "lucide-react";
 
 interface DigitalTwinViewProps {
-  digitalTwin: DigitalTwin;
+  digitalTwin?: DigitalTwin | null;
 }
 
-export function DigitalTwinView({ digitalTwin }: DigitalTwinViewProps) {
+export function DigitalTwinView({ digitalTwin: rawTwin }: DigitalTwinViewProps) {
+  const digitalTwin = rawTwin || createDefaultDigitalTwin();
   return (
     <motion.div 
       initial={{ opacity: 0, y: 20 }}

@@ -30,7 +30,11 @@ export class PredictionEngine {
     }
 
     // Se o gargalo é conversão, mudar a Bio (onde fica o CTA) tem impacto massivo.
-    if (twin.metrics.conversionVelocity < 30) {
+    const conversionVelocity = twin?.metrics?.conversionVelocity || 40;
+    const executionScore = twin?.metrics?.executionScore || 45;
+    const overallScore = twin?.metrics?.overallScore || 50;
+
+    if (conversionVelocity < 30) {
       if (actionTarget === "Bio") {
          conversionMultiplier = 3.0;
          scoreMultiplier = 1.8;
@@ -71,13 +75,13 @@ export class PredictionEngine {
     const finalScoreImpact = Math.round(baseImpact * scoreMultiplier);
     
     // Penaliza a confiança se o Execution Score for baixo (o usuário pode fazer a mudança mal feita)
-    const finalConfidence = twin.metrics.executionScore < 50 
+    const finalConfidence = executionScore < 50 
       ? Math.max(50, confidenceBase - 15) 
-      : Math.min(99, confidenceBase + (twin.metrics.executionScore / 10));
+      : Math.min(99, confidenceBase + (executionScore / 10));
 
     return {
       actionTarget,
-      scoreImpact: twin.metrics.overallScore + finalScoreImpact,
+      scoreImpact: overallScore + finalScoreImpact,
       conversionImpact: Number((baseImpact * 0.8 * conversionMultiplier).toFixed(1)),
       authorityImpact: Number((authorityBase * scoreMultiplier).toFixed(1)),
       confidence: Math.round(finalConfidence),

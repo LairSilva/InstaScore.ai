@@ -2,42 +2,73 @@ import React, { useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { BrainCircuit, Send, Bot, User, Sparkles, AlertCircle } from "lucide-react";
 import { AnalysisResponse } from "../../types";
-import { DigitalTwin } from "../../core/DigitalTwin";
+import { DigitalTwin, createDefaultDigitalTwin } from "../../core/DigitalTwin";
 
 interface MentorViewProps {
   diagnosisResult: AnalysisResponse;
   userName: string;
-  digitalTwin: DigitalTwin;
+  digitalTwin?: DigitalTwin | null;
 }
 
-export function MentorView({ diagnosisResult, userName, digitalTwin }: MentorViewProps) {
+export function MentorView({ diagnosisResult, userName, digitalTwin: rawTwin }: MentorViewProps) {
+  const digitalTwin = rawTwin || createDefaultDigitalTwin(diagnosisResult, userName);
   const [messages, setMessages] = useState([
     {
       id: "1",
       role: "ai",
-      text: `Olá, ${userName.split(" ")[0]}. Analisei seu histórico e percebi que seu Momentum Score está em ${digitalTwin.metrics.momentumScore}. Seu último gargalo foi em Conversão. Considerando os padrões de crescimento atuais do seu nicho, como posso ajudar você hoje?`
+      text: `Olá, ${userName ? userName.split(" ")[0] : "Criador"}. Analisei seu histórico e percebi que seu Momentum Score está em ${digitalTwin.metrics?.momentumScore || 50}. Seu último gargalo foi em Conversão. Considerando os padrões de crescimento atuais do seu nicho, como posso ajudar você hoje?`
     }
   ]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const handleSend = () => {
-    if (!input.trim()) return;
+  const handleSend = async (customText?: string) => {
+    const textToSend = (customText || input).trim();
+    if (!textToSend || isTyping) return;
     
-    const userMsg = { id: Date.now().toString(), role: "user", text: input };
+    const userMsg = { id: Date.now().toString(), role: "user", text: textToSend };
     setMessages(prev => [...prev, userMsg]);
-    setInput("");
+    if (!customText) setInput("");
     setIsTyping(true);
+    setErrorMessage(null);
 
-    setTimeout(() => {
-      const aiMsg = { 
-        id: (Date.now() + 1).toString(), 
-        role: "ai", 
-        text: `Consultando seu Digital Twin: Percebo que sua Execução (${digitalTwin.metrics.executionScore}) permite que foquemos em tarefas mais complexas agora. Sobre "${userMsg.text}", a melhor estratégia é alinhar sua Bio com o que o banco de dados global aponta que mais converte no seu nicho atualmente.` 
+    try {
+      const res = await fetch("/api/mentor/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          message: textToSend,
+          digitalTwin,
+          diagnosisResult,
+          history: messages.slice(-6)
+        })
+      });
+
+      const data = await res.json();
+      if (data.success && data.text) {
+        const aiMsg = { 
+          id: (Date.now() + 1).toString(), 
+          role: "ai", 
+          text: data.text 
+        };
+        setMessages(prev => [...prev, aiMsg]);
+      } else {
+        throw new Error(data.message || "Erro ao consultar o mentor.");
+      }
+    } catch (err: any) {
+      console.error("[Mentor Chat Error]", err);
+      const fallbackMsg = {
+        id: (Date.now() + 1).toString(),
+        role: "ai",
+        text: `Consultando seu Digital Twin (Score ${digitalTwin.metrics?.overallScore || 50}/100): Com base nos seus dados de ${digitalTwin.metrics?.executionScore || 45} de Execução, o foco imediato deve ser otimizar a clareza da sua Bio e nos primeiros 3 segundos dos seus vídeos.`
       };
-      setMessages(prev => [...prev, aiMsg]);
+      setMessages(prev => [...prev, fallbackMsg]);
+    } finally {
       setIsTyping(false);
-    }, 1500);
+    }
   };
 
   return (
@@ -59,7 +90,7 @@ export function MentorView({ diagnosisResult, userName, digitalTwin }: MentorVie
       <div className="mb-4 bg-slate-900 border border-slate-800 rounded-xl p-3 flex items-start gap-3">
         <AlertCircle size={16} className="text-amber-500 mt-0.5 shrink-0" />
         <p className="text-xs text-slate-400 leading-relaxed">
-          <strong className="text-slate-200">Contexto Carregado:</strong> A IA tem acesso ao seu C.A.G.E Score de {digitalTwin.metrics.overallScore}, gargalos críticos e padrões comportamentais identificados.
+          <strong className="text-slate-200">Contexto Carregado:</strong> A IA tem acesso ao seu C.A.G.E Score de {digitalTwin.metrics?.overallScore || 50}, gargalos críticos e padrões comportamentais identificados.
         </p>
       </div>
 
@@ -126,9 +157,9 @@ export function MentorView({ diagnosisResult, userName, digitalTwin }: MentorVie
             </div>
           </div>
           <div className="flex gap-2 mt-3 px-1 overflow-x-auto pb-1 hide-scrollbar">
-             <button onClick={() => setInput("Quais padrões do meu nicho devo seguir?")} className="shrink-0 text-xs text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-full hover:bg-slate-800 transition-colors">Quais padrões do meu nicho devo seguir?</button>
-             <button onClick={() => setInput("Execute a geração de Bio para mim.")} className="shrink-0 text-xs text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-full hover:bg-slate-800 transition-colors">Execute a geração de Bio</button>
-             <button onClick={() => setInput("Como melhoro minha consistência?")} className="shrink-0 text-xs text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-full hover:bg-slate-800 transition-colors">Aumentar Consistência</button>
+             <button disabled={isTyping} onClick={() => handleSend("Quais padrões do meu nicho devo seguir para acelerar o crescimento?")} className="shrink-0 text-xs text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-full hover:bg-slate-800 transition-colors disabled:opacity-50">Quais padrões do meu nicho devo seguir?</button>
+             <button disabled={isTyping} onClick={() => handleSend("Gere 2 opções de Bio de alta conversão para o meu nicho.")} className="shrink-0 text-xs text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-full hover:bg-slate-800 transition-colors disabled:opacity-50">Gerar Bio de Alta Conversão</button>
+             <button disabled={isTyping} onClick={() => handleSend("Qual é a ação prioritária para aumentar meu Momentum Score?")} className="shrink-0 text-xs text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-full hover:bg-slate-800 transition-colors disabled:opacity-50">Ação de Maior Impacto</button>
           </div>
         </div>
       </div>

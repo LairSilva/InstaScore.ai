@@ -5,7 +5,26 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { DiagnosisSchema } from "./src/schemas/diagnosis";
 import { calculateScoring, CRITERIA } from "./src/config/methodology";
-import { GEMINI_MODEL } from "./src/config/ai";
+import { AI_MODEL_ROUTER, GEMINI_MODEL } from "./src/config/ai";
+import { generateStartModeStrategy } from "./src/engine/start-mode-generator";
+import { 
+  getSubscription, 
+  getUsage, 
+  checkUserEntitlement, 
+  checkAndIncrementQuota, 
+  createCheckoutSessionServer,
+  validateWebhookSignature,
+  processWebhookEvent, 
+  getCheckoutSessionStatus,
+  cancelSubscriptionServer, 
+  logAiExecutionCost, 
+  getAdminMetrics,
+  submitUserFeedback,
+  listFeedbackRecords
+} from "./src/lib/billing-server";
+import { PLANS, getPlanConfig } from "./src/config/plans";
+import { MissionService } from "./src/engine/missions/MissionService";
+import { StrategicBrainServer } from "./src/engine/strategic/StrategicBrainServer";
 
 dotenv.config();
 
@@ -50,6 +69,1361 @@ app.get("/api/health", (req, res) => {
     queue: "ok",
     timestamp: new Date().toISOString()
   });
+});
+
+/**
+ * COMMERCIAL BILLING & REAL PAYMENT GATEWAY ROUTES
+ */
+
+// 1. Get current subscription, plan config, and usage for user
+app.get("/api/subscription/status", (req, res) => {
+  const userId = (req.query.userId as string) || (req.headers["x-user-id"] as string) || "anonymous";
+  const sub = getSubscription(userId);
+  const usage = getUsage(userId);
+  const planConfig = getPlanConfig(sub.plan);
+
+  return res.json({
+    success: true,
+    subscription: sub,
+    usage,
+    planConfig,
+    isPro: sub.plan === "PRO" && sub.status === "active"
+  });
+});
+
+// 2. Create REAL checkout session (Mercado Pago / Stripe / Production Gateway)
+app.post("/api/checkout/create-session", async (req, res) => {
+  try {
+    const { userId, planId, cycle, paymentMethod, userEmail } = req.body;
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "userId_required" });
+    }
+
+    const appUrl = `${req.protocol}://${req.get('host')}`;
+
+    const sessionRecord = await createCheckoutSessionServer({
+      userId,
+      planId: planId === "PRO" ? "PRO" : "FREE",
+      cycle: cycle === "annual" ? "annual" : "monthly",
+      paymentMethod: paymentMethod === "card" ? "card" : "pix",
+      userEmail,
+      appUrl
+    });
+
+    const selectedPlanConfig = getPlanConfig(sessionRecord.planId);
+    const formattedPrice = sessionRecord.cycle === "annual" 
+      ? selectedPlanConfig.formattedPriceAnnual 
+      : selectedPlanConfig.formattedPriceMonthly;
+
+    return res.json({
+      success: true,
+      sessionId: sessionRecord.sessionId,
+      userId: sessionRecord.userId,
+      planId: sessionRecord.planId,
+      cycle: sessionRecord.cycle,
+      paymentMethod: sessionRecord.paymentMethod,
+      amount: sessionRecord.amount,
+      formattedPrice,
+      provider: sessionRecord.provider,
+      pixQrCodeText: sessionRecord.pixQrCodeText,
+      pixQrCodeBase64: sessionRecord.pixQrCodeBase64,
+      checkoutUrl: sessionRecord.checkoutUrl,
+      expiresAt: sessionRecord.expiresAt
+    });
+  } catch (err: any) {
+    console.error("[Checkout Creation Failed]", err);
+    return res.status(500).json({
+      success: false,
+      error: "CHECKOUT_CREATION_FAILED",
+      message: "Não foi possível gerar a sessão de pagamento. Tente novamente."
+    });
+  }
+});
+
+// 3. Webhook endpoint for payment gateway events with SIGNATURE VALIDATION & IDEMPOTENCY
+app.post("/api/webhook/payment", async (req, res) => {
+  // Validate webhook secret/signature in production
+  const isSignatureValid = validateWebhookSignature(req.headers, req.body);
+  if (!isSignatureValid) {
+    console.warn("[InstaScore Webhook] Unauthorized or unauthenticated webhook signature rejected!");
+    return res.status(401).json({ success: false, error: "unauthorized_webhook_signature" });
+  }
+
+  // Parse webhook payload (Mercado Pago IPN & Webhooks)
+  let eventId = req.body.eventId || req.body.id || req.body.data?.id;
+  let userId = req.body.userId || req.body.metadata?.user_id || req.body.metadata?.userId || req.body.data?.metadata?.user_id;
+  let eventType = req.body.eventType || req.body.action || req.body.type || "payment.approved";
+  let status = req.body.status || req.body.data?.status || "approved";
+  let cycle = req.body.cycle || req.body.metadata?.cycle;
+  let provider = req.body.provider || "mercadopago";
+  let sessionId = req.body.sessionId || req.body.metadata?.session_id || req.body.metadata?.sessionId;
+  const providerPaymentId = req.body.providerPaymentId || String(req.body.data?.id || req.body.id || "");
+
+  // Handles Mercado Pago topic/IPN notifications
+  if (req.body.type === "payment" && req.body.data?.id) {
+    eventId = `mp_evt_${req.body.data.id}`;
+    eventType = "payment.updated";
+  }
+
+  if (!eventId) {
+    eventId = `evt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  }
+
+  if (!userId && !providerPaymentId) {
+    // If notification without userId or paymentId directly in payload, respond 200 OK
+    return res.json({ success: true, message: "webhook_received_awaiting_details" });
+  }
+
+  console.log(`[InstaScore Webhook] Processing event '${eventType}' (${eventId}) for user '${userId || "lookup"}' with status '${status}'`);
+
+  const result = await processWebhookEvent({
+    eventId,
+    eventType,
+    userId: userId || "anonymous",
+    cycle: cycle === "annual" ? "annual" : "monthly",
+    status,
+    provider,
+    sessionId,
+    providerPaymentId,
+    payload: req.body
+  });
+
+  return res.json({
+    success: true,
+    idempotentProcessed: result.processed,
+    reason: result.reason,
+    subscription: result.subscription
+  });
+});
+
+// 4. Poll status of checkout session (Real-Time Pix/Card Approval Auto-Detection)
+app.get("/api/checkout/status", (req, res) => {
+  const sessionId = req.query.sessionId as string;
+  const userId = (req.query.userId as string) || (req.headers["x-user-id"] as string) || "anonymous";
+
+  if (!sessionId) {
+    return res.status(400).json({ success: false, error: "sessionId_required" });
+  }
+
+  const result = getCheckoutSessionStatus(sessionId, userId);
+  return res.json({
+    success: true,
+    ...result
+  });
+});
+
+// 5. Cancel subscription route
+app.post("/api/subscription/cancel", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) {
+    return res.status(400).json({ success: false, error: "userId_required" });
+  }
+
+  const result = await cancelSubscriptionServer(userId);
+  return res.json({
+    success: true,
+    message: "Sua assinatura foi cancelada. Seu acesso Pro continuará ativo até o final do período vigente.",
+    subscription: result.subscription
+  });
+});
+
+
+// 5. PRO AI Content Generator Endpoint (Protected by Content AI Entitlement)
+app.post("/api/generate-content", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  // Check entitlement
+  const entitlement = checkUserEntitlement(userId, "contentAi");
+  if (!entitlement.allowed) {
+    return res.status(403).json({
+      success: false,
+      error: "PAYWALL_REQUIRED",
+      message: entitlement.reason || "Este recurso de geração de conteúdo por IA é exclusivo do plano InstaScore PRO.",
+      paywallRequired: true
+    });
+  }
+
+  // Check Quota
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({
+      success: false,
+      error: quota.errorCode,
+      message: quota.message
+    });
+  }
+
+  const { contentType, niche, objective, targetAudience } = req.body;
+  const promptText = `Você é o Estrategista de Conteúdo sênior do InstaScore.
+Gere 5 opções de ${contentType || "roteiros de Reels e ganchos de alta retenção"} focadas no nicho "${niche || "Geral"}", objetivo "${objective || "Vendas"}" e público "${targetAudience || "Geral"}".
+Forneça:
+1. Titulo atraente.
+2. Gancho visual e falado nos primeiros 3 segundos.
+3. Roteiro ou texto passo a passo.
+4. Chamada para Ação (CTA) clara.
+Retorne a resposta formatada de forma limpa em Markdown.`;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+    const response = await ai.models.generateContent({
+      model: AI_MODEL_ROUTER.primaryModel,
+      contents: promptText
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: `generate_content_${contentType}`,
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 500,
+      outputTokens: 800
+    });
+
+    return res.json({
+      success: true,
+      content: response.text,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[InstaScore] Content generation failed:", err);
+    return res.status(500).json({
+      success: false,
+      error: "CONTENT_GENERATION_FAILED",
+      message: "Não foi possível gerar o conteúdo neste momento. Tente novamente."
+    });
+  }
+});
+
+// 5.1 Mission Engine Real Execution & Bio AI Generator Endpoint
+app.post("/api/mission/execute", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+  const { 
+    missionType, 
+    criterionId, 
+    criterionTitle, 
+    criterionImpact, 
+    userName, 
+    handle, 
+    niche, 
+    subNiche, 
+    objective, 
+    targetAudience, 
+    currentBio, 
+    currentName, 
+    score, 
+    identifiedGaps, 
+    modifier 
+  } = req.body;
+
+  if (!missionType) {
+    return res.status(400).json({ success: false, error: "missionType_required" });
+  }
+
+  try {
+    const startTime = Date.now();
+    const result = await MissionService.executeMission({
+      missionType,
+      criterionId,
+      criterionTitle,
+      criterionImpact,
+      userName: userName || "Criador",
+      handle,
+      niche: niche || "Geral",
+      subNiche,
+      objective: objective || "Crescimento e Conversão",
+      targetAudience: targetAudience || "Público Geral",
+      currentBio,
+      currentName,
+      score: score || 50,
+      identifiedGaps,
+      modifier
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: `mission_execute_${missionType}`,
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 600,
+      outputTokens: 900
+    });
+
+    return res.json({
+      success: true,
+      result
+    });
+  } catch (err: any) {
+    console.error("[InstaScore Mission Execution Error]", err);
+    return res.status(500).json({
+      success: false,
+      error: "MISSION_EXECUTION_FAILED",
+      message: err.message || "Não foi possível executar esta missão neste momento."
+    });
+  }
+});
+
+// 6. Real-time AI Mentor Chat Endpoint (Digital Twin Context Grounded)
+app.post("/api/mentor/chat", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+  const { message, digitalTwin, diagnosisResult, history } = req.body;
+
+  if (!message || typeof message !== "string" || !message.trim()) {
+    return res.status(400).json({ success: false, error: "message_required" });
+  }
+
+  // Quota check
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({
+      success: false,
+      error: quota.errorCode,
+      message: quota.message
+    });
+  }
+
+  const overallScore = digitalTwin?.metrics?.overallScore ?? diagnosisResult?.scoring?.score ?? 50;
+  const executionScore = digitalTwin?.metrics?.executionScore ?? 45;
+  const momentumScore = digitalTwin?.metrics?.momentumScore ?? 50;
+  const criticalGaps = diagnosisResult?.diagnosis?.critical_gaps?.map((g: any) => `- ${g.title}: ${g.reason}`).join("\n") || "Nenhum gargalo crítico específico registrado.";
+  const strengths = diagnosisResult?.diagnosis?.strengths?.map((s: any) => `- ${s.title}`).join("\n") || "Em desenvolvimento.";
+  const niche = diagnosisResult?.scoring?.categories?.find((c: any) => c.id === "positioning") ? "Estratégico" : "Geral";
+
+  const promptText = `Você é o Mentor e Estrategista Sênior de Crescimento do InstaScore OS.
+Você orienta o usuário de forma analítica, direta, prática e sem rodeios teóricos, baseando-se estritamente nos dados do perfil dele.
+
+DADOS DO PERFIL DO USUÁRIO:
+- C.A.G.E Score Geral: ${overallScore}/100
+- Execution Score: ${executionScore}/100
+- Momentum Score: ${momentumScore}/100
+- Principais Gargalos Identificados:
+${criticalGaps}
+- Pontos Fortes:
+${strengths}
+
+HISTÓRICO RECENTE DA CONVERSA:
+${Array.isArray(history) ? history.slice(-4).map((h: any) => `${h.role === "user" ? "Usuário" : "Mentor"}: ${h.text}`).join("\n") : ""}
+
+NOVA PERGUNTA DO USUÁRIO:
+"${message}"
+
+DIRETRIZES DA RESPOSTA:
+1. Responda em Português do Brasil com tom de consultoria executiva, empática e altamente prática.
+2. Dê orientações acionáveis para execução imediata.
+3. Se o usuário pedir para gerar uma Bio, gere 2 opções claras com menos de 150 caracteres.
+4. Mantenha a resposta concisa (máximo de 3 parágrafos ou passos pontuais).
+5. Não use clichês vazios como "supercharge" ou promessas mágicas de viralização rápida.`;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+    const response = await ai.models.generateContent({
+      model: AI_MODEL_ROUTER.primaryModel,
+      contents: promptText
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "mentor_chat",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 600,
+      outputTokens: 400
+    });
+
+    return res.json({
+      success: true,
+      text: response.text || "Compreendido. Vamos focar nos seus principais gargalos para acelerar o crescimento do seu perfil.",
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[InstaScore Mentor] Chat generation error:", err);
+    // Intelligent fallback response based on Digital Twin
+    return res.json({
+      success: true,
+      text: `Analisando seu Digital Twin (Score ${overallScore}/100): Para a sua dúvida sobre "${message.slice(0, 40)}...", a prioridade estratégica imediata é otimizar sua Bio e focar nos primeiros 3 segundos dos seus vídeos para reter o público certo.`,
+      fallbackUsed: true
+    });
+  }
+});
+
+// 7. Start Mode AI Strategy Generator Endpoint (Customized Naming, Bio, Pillars, Plan)
+app.post("/api/start-mode/generate", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+  const { projectIdea, objective } = req.body;
+
+  if (!projectIdea || typeof projectIdea !== "string" || !projectIdea.trim()) {
+    return res.status(400).json({ success: false, error: "projectIdea_required" });
+  }
+
+  // Quota check
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({
+      success: false,
+      error: quota.errorCode,
+      message: quota.message
+    });
+  }
+
+  const promptText = `Você é o Arquiteto de Perfis do InstaScore Start OS.
+O usuário quer criar uma conta do zero no Instagram.
+Ideia/Projeto: "${projectIdea}"
+Objetivo Principal: "${objective || "Vender produtos e serviços e construir autoridade"}"
+
+Gere uma estratégia em JSON com as seguintes chaves exatas:
+{
+  "recommendedSubniche": "Subnicho específico e diferenciado",
+  "targetAudience": "Público-alvo detalhado",
+  "coreProblem": "Principal dor que o perfil resolve",
+  "uniqueDifferential": "Diferencial de posicionamento único",
+  "names": [
+    { "name": "Nome de Exibição", "handle": "@nomedeusuario", "category": "Autoridade | Memorável | Premium | Criativo | Pessoal | Comercial", "whyItWorks": "Motivo", "memorabilityScore": 92 }
+  ],
+  "bios": [
+    { "id": "bio_1", "category": "Autoridade & Especialista", "text": "Bio estruturada com menos de 150 caracteres", "highlight": "Destaque da proposta" },
+    { "id": "bio_2", "category": "Conversão & Vendas", "text": "Bio com CTA clara e menos de 150 caracteres", "highlight": "Foco em vendas" },
+    { "id": "bio_3", "category": "Comunidade & Conexão", "text": "Bio humanizada com menos de 150 caracteres", "highlight": "Foco em engajamento" }
+  ]
+}
+Retorne apenas JSON válido.`;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+    const response = await ai.models.generateContent({
+      model: AI_MODEL_ROUTER.primaryModel,
+      contents: promptText
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "start_mode_ai_generation",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 500,
+      outputTokens: 900
+    });
+
+    // Base deterministic result from mathematical engine
+    const baseResult = generateStartModeStrategy({ projectIdea, objective: objective || "" });
+
+    // Parse AI JSON additions if valid
+    const rawText = response.text || "{}";
+    const cleaned = cleanAndParseJson(rawText);
+
+    if (cleaned && typeof cleaned === "object") {
+      if (cleaned.recommendedSubniche) {
+        baseResult.territory.recommendedSubniche = cleaned.recommendedSubniche;
+      }
+      if (cleaned.targetAudience) {
+        baseResult.territory.targetAudience = cleaned.targetAudience;
+      }
+      if (cleaned.coreProblem) {
+        baseResult.territory.coreProblem = cleaned.coreProblem;
+      }
+      if (cleaned.uniqueDifferential || cleaned.potentialDifferential) {
+        baseResult.territory.potentialDifferential = cleaned.uniqueDifferential || cleaned.potentialDifferential;
+      }
+      if (Array.isArray(cleaned.names) && cleaned.names.length > 0) {
+        // Merge generated names with deterministic ones to guarantee 20 names
+        const validNames = cleaned.names.filter((n: any) => n.name && n.handle);
+        if (validNames.length > 0) {
+          baseResult.nameSuggestions = [...validNames, ...baseResult.nameSuggestions].slice(0, 20);
+          baseResult.selectedName = baseResult.nameSuggestions[0];
+        }
+      }
+      if (Array.isArray(cleaned.bios) && cleaned.bios.length > 0) {
+        const validBios = cleaned.bios.filter((b: any) => b.text && b.text.length <= 160);
+        if (validBios.length > 0) {
+          baseResult.bioOptions = [...validBios, ...baseResult.bioOptions].slice(0, 5);
+          baseResult.selectedBio = baseResult.bioOptions[0];
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      result: baseResult,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.warn("[InstaScore Start Mode] AI generation fallback triggered:", err);
+    // Deterministic mathematical engine guarantee
+    const fallbackResult = generateStartModeStrategy({ projectIdea, objective: objective || "" });
+    return res.json({
+      success: true,
+      result: fallbackResult,
+      fallbackUsed: true
+    });
+  }
+});
+
+// 8. Simulator Bio & CTA AI Optimizer Endpoint
+app.post("/api/simulator/optimize", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+  const { currentBio, currentCta, niche, objective } = req.body;
+
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({
+      success: false,
+      error: quota.errorCode,
+      message: quota.message
+    });
+  }
+
+  const promptText = `Você é o Otimizador de Conversão do InstaScore.
+Bio Atual: "${currentBio || "Não informada"}"
+CTA Atual: "${currentCta || "Não informada"}"
+Nicho: "${niche || "Geral"}"
+Objetivo: "${objective || "Vendas"}"
+
+Gere 3 versões de Bio com alto poder de conversão (máximo 150 caracteres cada) e 3 opções de Call To Action diretas.
+Retorne um JSON com a estrutura:
+{
+  "optimizedBios": ["Bio 1", "Bio 2", "Bio 3"],
+  "optimizedCtas": ["CTA 1", "CTA 2", "CTA 3"],
+  "rationale": "Breve justificativa técnica do porquê essas alterações aumentam a conversão."
+}
+Retorne apenas JSON válido.`;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+    const response = await ai.models.generateContent({
+      model: AI_MODEL_ROUTER.primaryModel,
+      contents: promptText
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "simulator_optimize",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 400,
+      outputTokens: 400
+    });
+
+    const parsed = cleanAndParseJson(response.text || "{}");
+    return res.json({
+      success: true,
+      bios: parsed?.optimizedBios || [
+        `${niche ? `Especialista em ${niche}` : "Posicionamento Estratégico"} • Transformando visitantes em clientes\n👇 Agende seu diagnóstico:`,
+        `Ajudo você a dominar o mercado de ${niche || "serviços"}.\n🚀 +Resultados em menos tempo\nClique abaixo e confira:`
+      ],
+      ctas: parsed?.optimizedCtas || ["Agendar Diagnóstico Grátis", "Conhecer Metodologia", "Falar no WhatsApp"],
+      rationale: parsed?.rationale || "Estruturação focada em eliminar atrito e destacar prova de valor imediata.",
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[Simulator Optimizer] AI error:", err);
+    return res.json({
+      success: true,
+      bios: [
+        `Estratégia & Resultados no nicho de ${niche || "Negócios"}.\n✨ Mais autoridade e conversão diária.\n👇 Toque no link abaixo:`,
+        `Transforme sua presença digital em vendas.\n🎯 Método validado para ${niche || "profissionais"}.\n👇 Saiba mais:`
+      ],
+      ctas: ["Acessar Consultoria", "Entrar em Contato", "Ver Resultados"],
+      rationale: "Bios e CTAs otimizadas para aumentar a clareza e o clique no link da bio.",
+      fallbackUsed: true
+    });
+  }
+});
+
+// 9. Admin Observability Endpoint
+app.get("/api/admin/metrics", (req, res) => {
+  const metrics = getAdminMetrics();
+  return res.json({
+    success: true,
+    metrics
+  });
+});
+
+/**
+ * -------------------------------------------------------------
+ * INSTASCORE PRO RESOLUTION ENGINE (V13 FULL PRO RESOLUTION SUITE)
+ * -------------------------------------------------------------
+ */
+
+// 10.1 PRO Reels Script Generator (Complete Hook, Script, Direction & Caption)
+app.post("/api/pro/reels-script", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  const entitlement = checkUserEntitlement(userId, "reelsGenerator");
+  if (!entitlement.allowed) {
+    return res.status(403).json({
+      success: false,
+      error: "PAYWALL_REQUIRED",
+      message: entitlement.reason || "A geração de roteiros de Reels PRO é exclusiva do plano InstaScore PRO.",
+      paywallRequired: true
+    });
+  }
+
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
+  }
+
+  const { theme, niche, objective, targetAudience, tone, criticalGaps } = req.body;
+
+  const promptText = `Você é o Diretor de Criação e Estrategista Audiovisual do InstaScore OS.
+Gere um Roteiro de Reels PRO completo, altamente persuasivo e prático.
+
+DADOS DE CONTEXTO:
+- Nicho: "${niche || "Geral"}"
+- Tema/Problema: "${theme || "Como resolver o maior gargalo do perfil"}"
+- Objetivo: "${objective || "Atrair clientes qualificados e gerar vendas"}"
+- Público-Alvo: "${targetAudience || "Público comprador"}"
+- Tom de Voz: "${tone || "Autoridade direta e prática"}"
+- Gargalos Diagnosticados: "${criticalGaps || "Falta de gancho nos primeiros 3s e CTA fraca"}"
+
+DIRETRIZES ANTI-CLICHÊ:
+- O gancho dos primeiros 3 segundos DEVE ter um elemento visual e um elemento falado que quebre o padrão de rolagem.
+- Não use frases batidas como "Você sabia?", "Fica comigo até o final" ou "Salve esse post".
+- Forneça a direção de câmera cena a cena com tempo estimado.
+
+Retorne ESTRITAMENTE em formato JSON com a estrutura:
+{
+  "title": "Título estratégico do Reel",
+  "estimatedDuration": "30 a 45 segundos",
+  "visualHook3s": "Instrução exata do que fazer nos primeiros 3 segundos (ex: mostrar tela, objeto, movimento)",
+  "spokenHook3s": "Texto exato falado nos primeiros 3 segundos",
+  "scenes": [
+    { "sceneNumber": 1, "timeframe": "0-3s", "visual": "Descrição visual de câmera e enquadramento", "spokenText": "Fala exata do criador", "onScreenText": "Texto na tela (se houver)" },
+    { "sceneNumber": 2, "timeframe": "3-15s", "visual": "Descrição visual", "spokenText": "Fala exata", "onScreenText": "Texto na tela" },
+    { "sceneNumber": 3, "timeframe": "15-30s", "visual": "Quebra de padrão ou demonstração", "spokenText": "Desenvolvimento do valor", "onScreenText": "Texto na tela" },
+    { "sceneNumber": 4, "timeframe": "30-40s", "visual": "Encerramento e chamada de ação", "spokenText": "CTA específica de conversão", "onScreenText": "Texto final de CTA" }
+  ],
+  "caption": "Legenda pronta formatada com parágrafos curtos, escaneabilidade e hashtags estratégicas",
+  "ctaAction": "Chamada exata para o Direct ou Comentário",
+  "audioRecommendation": "Tipo de áudio recomendado (Voz original + instrumental sutil em -25dB)"
+}`;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+    const response = await ai.models.generateContent({
+      model: AI_MODEL_ROUTER.primaryModel,
+      contents: promptText
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "pro_reels_script",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 650,
+      outputTokens: 900
+    });
+
+    const parsed = cleanAndParseJson(response.text || "{}");
+    return res.json({
+      success: true,
+      deliverable: parsed,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[InstaScore PRO Reels Error]", err);
+    return res.status(500).json({ success: false, error: "REELS_GENERATION_FAILED", message: err.message });
+  }
+});
+
+// 10.2 PRO Carousel Generator (Slide-by-Slide Visual & Text Structure)
+app.post("/api/pro/carousel", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  const entitlement = checkUserEntitlement(userId, "carouselGenerator");
+  if (!entitlement.allowed) {
+    return res.status(403).json({
+      success: false,
+      error: "PAYWALL_REQUIRED",
+      message: entitlement.reason || "A criação de carrosséis PRO é exclusiva do plano InstaScore PRO.",
+      paywallRequired: true
+    });
+  }
+
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
+  }
+
+  const { theme, niche, objective, targetAudience, slidesCount } = req.body;
+
+  const promptText = `Você é o Designer de Informação e Copywriter de Carrosséis do InstaScore OS.
+Crie um Carrossel de Alta Retenção e Compartilhamento (${slidesCount || 7} a 8 slides) para o perfil.
+
+DADOS:
+- Nicho: "${niche || "Geral"}"
+- Tema: "${theme || "Guia definitivo passo a passo"}"
+- Objetivo: "${objective || "Salvar, compartilhar e converter seguidores"}"
+- Público-Alvo: "${targetAudience || "Público qualificado"}"
+
+ESTRUTURA OBRIGATÓRIA DOS SLIDES:
+- Slide 1: Gancho magnético visual e título de altíssimo impacto (promessa clara).
+- Slides 2 a 6: Desenvolvimento progressivo, 1 ideia central por slide, texto enxuto e escaneável.
+- Slide Penúltimo: Resumo prático ou checklist de fixação.
+- Slide Final: CTA irresistível (comente palavra-chave ou envie mensagem no Direct).
+
+Retorne ESTRITAMENTE em JSON:
+{
+  "title": "Título Principal da Capa",
+  "slides": [
+    { "slideNumber": 1, "type": "capa", "headline": "Título do Slide", "subheadline": "Subtítulo de apoio", "body": "Texto curto", "visualNote": "Orientação de layout/imagem para Canva/Figma" },
+    { "slideNumber": 2, "type": "conteudo", "headline": "Título do Slide", "subheadline": "", "body": "Texto", "visualNote": "Orientação visual" },
+    { "slideNumber": 3, "type": "conteudo", "headline": "Título do Slide", "subheadline": "", "body": "Texto", "visualNote": "Orientação visual" },
+    { "slideNumber": 4, "type": "conteudo", "headline": "Título do Slide", "subheadline": "", "body": "Texto", "visualNote": "Orientação visual" },
+    { "slideNumber": 5, "type": "conteudo", "headline": "Título do Slide", "subheadline": "", "body": "Texto", "visualNote": "Orientação visual" },
+    { "slideNumber": 6, "type": "resumo", "headline": "Resumo em 3 passos", "subheadline": "", "body": "Checklist rápido", "visualNote": "Orientação visual" },
+    { "slideNumber": 7, "type": "cta", "headline": "Gostou desse conteúdo?", "subheadline": "Comente 'GUIA' para receber o material completo no seu direct", "body": "Salve para consultar quando for executar", "visualNote": "Foco na seta e no ícone de salvar" }
+  ],
+  "caption": "Legenda completa pronta para publicação",
+  "designAdvice": "Dicas de paleta de cores, tipografia e contraste para garantir leitura fácil"
+}`;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+    const response = await ai.models.generateContent({
+      model: AI_MODEL_ROUTER.primaryModel,
+      contents: promptText
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "pro_carousel",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 700,
+      outputTokens: 950
+    });
+
+    const parsed = cleanAndParseJson(response.text || "{}");
+    return res.json({
+      success: true,
+      deliverable: parsed,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[InstaScore PRO Carousel Error]", err);
+    return res.status(500).json({ success: false, error: "CAROUSEL_GENERATION_FAILED", message: err.message });
+  }
+});
+
+// 10.3 PRO High-Conversion Stories Sequence (5-Story Sales Funnel)
+app.post("/api/pro/stories-sequence", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  const entitlement = checkUserEntitlement(userId, "storiesGenerator");
+  if (!entitlement.allowed) {
+    return res.status(403).json({
+      success: false,
+      error: "PAYWALL_REQUIRED",
+      message: entitlement.reason || "O gerador de sequências de Stories é exclusivo do plano InstaScore PRO.",
+      paywallRequired: true
+    });
+  }
+
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
+  }
+
+  const { objective, niche, targetAudience, offerOrProduct } = req.body;
+
+  const promptText = `Você é o Estrategista de Conversão em Stories do InstaScore OS.
+Crie uma Sequência de Stories de 5 Etapas (Funil Diário de Conversão) para o perfil.
+
+DADOS:
+- Nicho: "${niche || "Geral"}"
+- Oferta/Serviço: "${offerOrProduct || "Consultoria / Produto Principal"}"
+- Objetivo: "${objective || "Gerar conversas e vendas no Direct"}"
+- Público-Alvo: "${targetAudience || "Público morno a quente"}"
+
+ESTRUTURA DO FUNIL DE STORIES:
+1. Story 1: Gancho / Quebra de Padrão com Enquete Interativa (Sim/Não ou Pergunta polarizadora).
+2. Story 2: Aprofundamento do Problema / Agitação da dor com relato ou bastidor real.
+3. Story 3: Mudança de perspectiva / Prova de valor / Estudo de caso rápido.
+4. Story 4: A Solução Clara / Por que o método/serviço funciona.
+5. Story 5: Chamada para Ação Direta (Sticker de Resposta / Envie 'QUERO' no Direct).
+
+Retorne ESTRITAMENTE em JSON:
+{
+  "sequenceTitle": "Tema da Sequência de Stories",
+  "funnelGoal": "Objetivo do funil",
+  "stories": [
+    { "storyNumber": 1, "stage": "Gancho & Interatividade", "format": "Foto de bastidor ou vídeo de 5s", "speechOrText": "Texto exato do Story", "interactiveElement": "Enquete: [Opção A vs Opção B]", "visualGuidance": "Orientação de enquadramento e figurino" },
+    { "storyNumber": 2, "stage": "Conexão com a Dor", "format": "Vídeo falando para câmera ou texto sobre fundo autêntico", "speechOrText": "Texto exato", "interactiveElement": "Nenhum ou Reação de fogo", "visualGuidance": "Orientação visual" },
+    { "storyNumber": 3, "stage": "Prova & Autoridade", "format": "Print de resultado, bastidor ou depoimento", "speechOrText": "Texto exato", "interactiveElement": "Caixa de perguntas ou Slider", "visualGuidance": "Orientação visual" },
+    { "storyNumber": 4, "stage": "Apresentação da Solução", "format": "Vídeo direto ou imagem explicativa", "speechOrText": "Texto exato", "interactiveElement": "Nenhum", "visualGuidance": "Orientação visual" },
+    { "storyNumber": 5, "stage": "CTA de Fechamento", "format": "Texto com fundo contrastante e sticker de direct", "speechOrText": "Texto exato com CTA", "interactiveElement": "Sticker 'Me envie mensagem' com palavra-chave 'QUERO'", "visualGuidance": "Orientação visual" }
+  ],
+  "directMessageReplyScript": "Script exato de resposta no Direct para quem responder ao Story 5"
+}`;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+    const response = await ai.models.generateContent({
+      model: AI_MODEL_ROUTER.primaryModel,
+      contents: promptText
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "pro_stories_sequence",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 600,
+      outputTokens: 850
+    });
+
+    const parsed = cleanAndParseJson(response.text || "{}");
+    return res.json({
+      success: true,
+      deliverable: parsed,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[InstaScore PRO Stories Error]", err);
+    return res.status(500).json({ success: false, error: "STORIES_GENERATION_FAILED", message: err.message });
+  }
+});
+
+// 10.4 PRO Positioning & Unique Differentiation Matrix
+app.post("/api/pro/positioning-strategy", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  const entitlement = checkUserEntitlement(userId, "positioning_generation");
+  if (!entitlement.allowed) {
+    return res.status(403).json({
+      success: false,
+      error: "PAYWALL_REQUIRED",
+      message: entitlement.reason || "A matriz de posicionamento PRO é exclusiva do plano InstaScore PRO.",
+      paywallRequired: true
+    });
+  }
+
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
+  }
+
+  const { niche, objective, targetAudience, strengths, criticalGaps } = req.body;
+
+  const promptText = `Você é o Arquiteto de Posicionamento e Marca Pessoal do InstaScore OS.
+Desenvolva a Matriz Estratégica de Posicionamento para o perfil se destacar da concorrência genérica.
+
+DADOS:
+- Nicho: "${niche || "Geral"}"
+- Objetivo: "${objective || "Autoridade e Vendas"}"
+- Público: "${targetAudience || "Geral"}"
+- Pontos Fortes: "${strengths || "Conhecimento técnico"}"
+- Gargalos: "${criticalGaps || "Comunicação generalista sem diferencial claro"}"
+
+Retorne ESTRITAMENTE em JSON:
+{
+  "corePromise": "Promessa central única sem clichês (máximo 120 caracteres)",
+  "contentTerritory": "Definição do território exato de domínio do perfil",
+  "differentiationAngle": "O que torna o método ou serviço deste perfil único comparado aos concorrentes",
+  "toneOfVoice": "Diretrizes de tom de voz (ex: Direto, sofisticado, acolhedor, combativo)",
+  "contentPillars": [
+    { "pillarName": "Pilar 1: Autoridade & Método", "percentage": "40%", "description": "Conteúdos que provam domínio técnico e quebram objeções" },
+    { "pillarName": "Pilar 2: Conexão & Bastidores", "percentage": "30%", "description": "Humanização estratégica e dia a dia prático" },
+    { "pillarName": "Pilar 3: Conversão & Oferta", "percentage": "30%", "description": "Chamadas diretas de atendimento e venda" }
+  ],
+  "antiTopics": ["Lista de 3 temas ou formatos genéricos que este perfil NUNCA deve postar para não diluir autoridade"],
+  "recommendedBioFormula": "Fórmula exata para a Bio: Quem sou + O que transformo + Prova + CTA"
+}`;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+    const response = await ai.models.generateContent({
+      model: AI_MODEL_ROUTER.primaryModel,
+      contents: promptText
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "pro_positioning",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 600,
+      outputTokens: 800
+    });
+
+    const parsed = cleanAndParseJson(response.text || "{}");
+    return res.json({
+      success: true,
+      deliverable: parsed,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[InstaScore PRO Positioning Error]", err);
+    return res.status(500).json({ success: false, error: "POSITIONING_FAILED", message: err.message });
+  }
+});
+
+// 10.5 PRO Tactical 30-Day Content Calendar Generator
+app.post("/api/pro/tactical-calendar", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  const entitlement = checkUserEntitlement(userId, "calendar_generation");
+  if (!entitlement.allowed) {
+    return res.status(403).json({
+      success: false,
+      error: "PAYWALL_REQUIRED",
+      message: entitlement.reason || "O calendário tático PRO é exclusivo do plano InstaScore PRO.",
+      paywallRequired: true
+    });
+  }
+
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
+  }
+
+  const { niche, objective, targetAudience, periodDays } = req.body;
+  const days = periodDays === 14 ? 14 : 7; // Generates 7 or 14 tactical strategic days
+
+  const promptText = `Você é o Estrategista Chefe de Planejamento Editorial do InstaScore OS.
+Crie um Plano Editorial Tático de ${days} Dias focado em resolver os gargalos de conversão do perfil.
+
+DADOS:
+- Nicho: "${niche || "Geral"}"
+- Objetivo: "${objective || "Crescimento e Conversão"}"
+- Público: "${targetAudience || "Comprador"}"
+
+Retorne ESTRITAMENTE em JSON:
+{
+  "calendarTitle": "Cronograma Tático de Publicações (${days} Dias)",
+  "primaryFocus": "Objetivo principal do ciclo de publicações",
+  "days": [
+    {
+      "day": 1,
+      "format": "Reels | Carrossel | Post Estático | Stories",
+      "strategicGoal": "Atração | Autoridade | Conexão | Conversão",
+      "headline": "Tema / Título Principal",
+      "hookIdea": "Gancho inicial de retenção",
+      "ctaTarget": "Comentário | Direct | Link da Bio"
+    }
+  ],
+  "weeklyDistribution": "3x Reels de atração, 2x Carrosséis de retenção, Stories diários de conversão"
+}`;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+    const response = await ai.models.generateContent({
+      model: AI_MODEL_ROUTER.primaryModel,
+      contents: promptText
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "pro_calendar",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 600,
+      outputTokens: 900
+    });
+
+    const parsed = cleanAndParseJson(response.text || "{}");
+    return res.json({
+      success: true,
+      deliverable: parsed,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[InstaScore PRO Calendar Error]", err);
+    return res.status(500).json({ success: false, error: "CALENDAR_FAILED", message: err.message });
+  }
+});
+
+// 10.6 PRO Visual Image Generation & Art Briefing (Imagen / Studio Asset Creation)
+app.post("/api/pro/generate-image", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  const entitlement = checkUserEntitlement(userId, "image_generation");
+  if (!entitlement.allowed) {
+    return res.status(403).json({
+      success: false,
+      error: "PAYWALL_REQUIRED",
+      message: entitlement.reason || "A geração de imagens estratégicas é exclusiva do plano InstaScore PRO.",
+      paywallRequired: true
+    });
+  }
+
+  const quota = checkAndIncrementQuota(userId, "IMAGE_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
+  }
+
+  const { prompt, aspectRatio, postType, niche } = req.body;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+
+    // Generate comprehensive professional prompt & briefing using AI
+    const designPrompt = `Você é o Diretor de Arte do InstaScore Studio.
+Gere um briefing de imagem de alta conversão para o post: "${prompt || "Imagem de capa estratégica"}" no nicho "${niche || "Profissional"}".
+Retorne em JSON:
+{
+  "recommendedVisualConcept": "Conceito visual limpo e profissional",
+  "colorPalette": ["#111827", "#10B981", "#F9FAFB"],
+  "midjourneyPrompt": "Prompt em inglês pronto para Midjourney v6 com parâmetros de iluminação e composição",
+  "canvaDesignInstructions": "Instruções passo a passo de montagem no Canva com tipografia e contraste",
+  "aspectRatio": "${aspectRatio || "4:5"}",
+  "visualFocalPoint": "Ponto focal para não cortar elementos no feed 1:1"
+}`;
+
+    const textResponse = await ai.models.generateContent({
+      model: AI_MODEL_ROUTER.primaryModel,
+      contents: designPrompt
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "pro_generate_image",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 400,
+      outputTokens: 500
+    });
+
+    const parsed = cleanAndParseJson(textResponse.text || "{}");
+
+    return res.json({
+      success: true,
+      deliverable: parsed,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[InstaScore PRO Image Generation Error]", err);
+    return res.status(500).json({ success: false, error: "IMAGE_GENERATION_FAILED", message: err.message });
+  }
+});
+
+// 10.7 Feedback Submission API (👍 / 👎 on any solution)
+app.post("/api/feedback/submit", (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+  const { solutionType, rating, comment, itemTitle } = req.body;
+
+  if (!rating || (rating !== "useful" && rating !== "not_useful")) {
+    return res.status(400).json({ success: false, error: "rating_invalid" });
+  }
+
+  const record = submitUserFeedback({
+    userId,
+    solutionType: solutionType || "general",
+    rating,
+    comment,
+    itemTitle
+  });
+
+  return res.json({
+    success: true,
+    message: "Obrigado pelo seu feedback! Sua avaliação ajuda a aprimorar nossos modelos.",
+    feedback: record
+  });
+});
+
+// 10.8 Feedback List API
+app.get("/api/feedback/list", (req, res) => {
+  const limit = parseInt(req.query.limit as string) || 50;
+  const feedbacks = listFeedbackRecords(limit);
+  return res.json({
+    success: true,
+    feedbacks
+  });
+});
+
+/**
+ * -------------------------------------------------------------
+ * INSTASCORE V12 — STRATEGIC BRAIN API SUITE
+ * -------------------------------------------------------------
+ */
+
+// 11.1 Strategic Positioning Engine & Profile Clarity Score (0-100)
+app.post("/api/strategic/positioning", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
+  }
+
+  const { username, account_name, niche, subniche, currentBio, goal, diagnosisScore, criticalGaps, strengths } = req.body;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+
+    const result = await StrategicBrainServer.generatePositioningAndClarity(ai, {
+      username: username || "usuario",
+      account_name,
+      niche: niche || "Geral",
+      subniche,
+      currentBio,
+      goal,
+      diagnosisScore,
+      criticalGaps,
+      strengths
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "strategic_positioning_clarity",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 650,
+      outputTokens: 900
+    });
+
+    return res.json({
+      success: true,
+      ...result,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[Strategic Positioning Error]", err);
+    return res.status(500).json({ success: false, error: "POSITIONING_FAILED", message: err.message });
+  }
+});
+
+// 11.2 Bio Strategy Engine (Authority, Conversion, Personality with anti-cliche)
+app.post("/api/strategic/bio", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
+  }
+
+  const { dna, currentBio } = req.body;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+
+    const report = await StrategicBrainServer.generateBioStrategy(ai, {
+      ...dna,
+      username: dna?.username || "usuario",
+      currentBio
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "strategic_bio_generator",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 500,
+      outputTokens: 750
+    });
+
+    return res.json({
+      success: true,
+      report,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[Strategic Bio Error]", err);
+    return res.status(500).json({ success: false, error: "BIO_STRATEGY_FAILED", message: err.message });
+  }
+});
+
+// 11.3 Name Strategy Engine (Descritivo, Autoridade, Marca, Conceitual, Diferenciador)
+app.post("/api/strategic/naming", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
+  }
+
+  const { dna } = req.body;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+
+    const recommendations = await StrategicBrainServer.generateNameStrategy(ai, dna || { username: "usuario" });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "strategic_name_generator",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 500,
+      outputTokens: 700
+    });
+
+    return res.json({
+      success: true,
+      recommendations,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[Strategic Naming Error]", err);
+    return res.status(500).json({ success: false, error: "NAME_STRATEGY_FAILED", message: err.message });
+  }
+});
+
+// 11.4 Content Pillars & Dynamic Content DNA Engine
+app.post("/api/strategic/pillars", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
+  }
+
+  const { dna } = req.body;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+
+    const pillars = await StrategicBrainServer.generateContentPillars(ai, dna || { username: "usuario" });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "strategic_pillars_generator",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: 0,
+      fallbackUsed: false,
+      inputTokens: 500,
+      outputTokens: 700
+    });
+
+    return res.json({
+      success: true,
+      pillars,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[Strategic Pillars Error]", err);
+    return res.status(500).json({ success: false, error: "PILLARS_FAILED", message: err.message });
+  }
+});
+
+// 11.5 Strategic Content Lab (Objective -> Target -> Pain -> Pillar -> Angle -> Format -> Content -> Quality Gate >= 75)
+app.post("/api/strategic/content-lab", async (req, res) => {
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  const entitlement = checkUserEntitlement(userId, "contentAi");
+  if (!entitlement.allowed) {
+    return res.status(403).json({
+      success: false,
+      error: "PAYWALL_REQUIRED",
+      message: entitlement.reason || "O Content Lab Estratégico é exclusivo do plano InstaScore PRO.",
+      paywallRequired: true
+    });
+  }
+
+  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  if (!quota.allowed) {
+    return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
+  }
+
+  const { dna, primary_objective, pilar, angle_type, format, reel_model, custom_topic_focus } = req.body;
+
+  try {
+    const ai = getGoogleGenAI();
+    const startTime = Date.now();
+
+    const item = await StrategicBrainServer.generateStrategicContentPiece(ai, {
+      dna,
+      primary_objective: primary_objective || "descoberta",
+      pilar,
+      angle_type: angle_type || "contradição",
+      format: format || "reel",
+      reel_model: reel_model || "educational",
+      custom_topic_focus
+    });
+    const durationMs = Date.now() - startTime;
+
+    logAiExecutionCost({
+      userId,
+      action: "strategic_content_lab",
+      modelUsed: AI_MODEL_ROUTER.primaryModel,
+      durationMs,
+      retries: item.quality_report.attempts_taken > 1 ? 1 : 0,
+      fallbackUsed: false,
+      inputTokens: 850,
+      outputTokens: 1100
+    });
+
+    return res.json({
+      success: true,
+      item,
+      quotaUsed: quota.currentCount,
+      quotaMax: quota.maxLimit
+    });
+  } catch (err: any) {
+    console.error("[Strategic Content Lab Error]", err);
+    return res.status(500).json({ success: false, error: "CONTENT_LAB_FAILED", message: err.message });
+  }
 });
 
 /**
@@ -211,85 +1585,295 @@ const GEMINI_RESPONSE_SCHEMA = {
   ]
 };
 
-// Route for analyzing screenshots
 /**
- * Call Gemini API with exponential backoff on transient errors and fallbacks to alternative models.
+ * Bulletproof JSON cleaning and parsing utility for AI model responses.
  */
-async function callGeminiWithRetryAndFallback(params: {
+function cleanAndParseJson(rawText: string): any {
+  if (!rawText || typeof rawText !== "string") {
+    throw new Error("EMPTY_AI_RESPONSE");
+  }
+
+  let cleaned = rawText.trim();
+
+  // Strip Markdown code fences if present (```json ... ``` or ``` ...)
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  }
+
+  // Extract JSON payload bounded by outermost curly braces
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (err: any) {
+    // Attempt sanitized repair: strip trailing commas and non-printable control characters
+    try {
+      const sanitized = cleaned
+        .replace(/,\s*([}\]])/g, "$1")
+        .replace(/[\u0000-\u001F\u007F-\u009F]/g, (c) => (c === "\n" || c === "\r" || c === "\t" ? c : " "));
+      return JSON.parse(sanitized);
+    } catch {
+      throw new Error(`JSON_PARSE_FAILED: ${err.message || "Invalid JSON syntax"}`);
+    }
+  }
+}
+
+// Route for analyzing screenshots
+interface AIExecutionMeta {
+  modelUsed: string;
+  totalCalls: number;
+  retries: number;
+  fallbackUsed: boolean;
+  durationMs: number;
+  status: "success" | "failed";
+  finishReason?: string;
+  responseLength?: number;
+}
+
+/**
+ * Execute multimodal analysis with automated Zod validation, fast correctional retries, and fallback routing.
+ */
+async function executeAnalysisPipeline(params: {
   parts: any[];
   systemInstruction: string;
   responseSchema: any;
-  temperature: number;
-}): Promise<{ text: string; modelUsed: string }> {
-  const modelsToTry = [
-    GEMINI_MODEL, // e.g. "gemini-3.5-flash"
-    "gemini-3.1-flash-lite",
-    "gemini-3.1-pro-preview"
-  ];
+  requestId: string;
+}): Promise<{ parsedDiagnosis: any; meta: AIExecutionMeta }> {
+  const overallStartTime = Date.now();
+  const models = [AI_MODEL_ROUTER.primaryModel, ...AI_MODEL_ROUTER.fallbackModels];
+  let totalCalls = 0;
+  let retries = 0;
+  let lastValidationError: any = null;
+  let lastDiagnosticInfo: any = null;
 
-  let lastError: any = null;
+  for (let modelIdx = 0; modelIdx < models.length; modelIdx++) {
+    const currentModel = models[modelIdx];
+    const isFallback = modelIdx > 0;
+    
+    console.log(`[InstaScore Pipeline] [${params.requestId}] Starting model execution: ${currentModel} (fallback=${isFallback})`);
 
-  for (const model of modelsToTry) {
-    let attempts = 0;
-    const maxAttempts = 3;
-    while (attempts < maxAttempts) {
-      try {
-        console.log(`[AI] calling model: ${model} (attempt ${attempts + 1}/${maxAttempts})`);
-        const ai = getGoogleGenAI();
-        const response = await ai.models.generateContent({
-          model: model,
-          contents: { parts: params.parts },
-          config: {
-            systemInstruction: params.systemInstruction,
-            responseMimeType: "application/json",
-            responseSchema: params.responseSchema,
-            temperature: params.temperature
-          }
-        });
+    // Step 1: Execute Multimodal Call
+    totalCalls++;
+    const callStart = Date.now();
+    let rawText = "";
+    let finishReason = "STOP";
 
-        if (response && response.text) {
-          console.log(`[AI] Success using model: ${model}`);
-          return {
-            text: response.text,
-            modelUsed: model
-          };
+    try {
+      const ai = getGoogleGenAI();
+      const response = await ai.models.generateContent({
+        model: currentModel,
+        contents: { parts: params.parts },
+        config: {
+          systemInstruction: params.systemInstruction,
+          responseMimeType: "application/json",
+          responseSchema: params.responseSchema,
+          temperature: 0.2
         }
-        throw new Error("Empty response returned from Gemini model " + model);
-      } catch (err: any) {
-        lastError = err;
-        attempts++;
-        const errStr = JSON.stringify(err) + " " + String(err) + " " + (err.message || "");
-        console.warn(`[AI] Error using model ${model} (attempt ${attempts}):`, err.message || err);
+      });
 
-        const isTransient = err.status === 503 ||
-                            err.status === 429 ||
-                            errStr.includes("503") ||
-                            errStr.includes("UNAVAILABLE") ||
-                            errStr.includes("high demand") ||
-                            errStr.includes("RESOURCE_EXHAUSTED") ||
-                            errStr.includes("429") ||
-                            errStr.includes("rate limit") ||
-                            errStr.includes("overloaded") ||
-                            errStr.includes("fetch failed");
+      rawText = response.text || "";
+      finishReason = response.candidates?.[0]?.finishReason || "STOP";
+      const callDuration = Date.now() - callStart;
 
-        if (isTransient && attempts < maxAttempts) {
-          const delay = attempts * 1500;
-          console.log(`[AI] Transient error detected. Retrying ${model} in ${delay}ms...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
+      console.log(`[InstaScore Pipeline] [${params.requestId}] ${currentModel} responded in ${callDuration}ms (length=${rawText.length}, finishReason=${finishReason})`);
+    } catch (apiErr: any) {
+      console.warn(`[InstaScore Pipeline] [${params.requestId}] API call error on ${currentModel}:`, apiErr.message || apiErr);
+      // If primary model has API network/quota error, continue immediately to fallback model
+      continue;
+    }
+
+    if (!rawText) {
+      console.warn(`[InstaScore Pipeline] [${params.requestId}] Empty response from ${currentModel}`);
+      continue;
+    }
+
+    // Step 2: Parse JSON
+    let parsedJson: any = null;
+    try {
+      parsedJson = cleanAndParseJson(rawText);
+    } catch (parseErr: any) {
+      console.warn(`[InstaScore Pipeline] [${params.requestId}] JSON parse error on ${currentModel}:`, parseErr.message);
+    }
+
+    // Step 3: Validate with Zod
+    if (parsedJson) {
+      const zodValidation = DiagnosisSchema.safeParse(parsedJson);
+      if (zodValidation.success) {
+        const totalDuration = Date.now() - overallStartTime;
+        console.log(`[InstaScore Pipeline] [${params.requestId}] Validation SUCCESS on ${currentModel} in ${totalDuration}ms (Calls: ${totalCalls}, Retries: ${retries})`);
+        return {
+          parsedDiagnosis: zodValidation.data,
+          meta: {
+            modelUsed: currentModel,
+            totalCalls,
+            retries,
+            fallbackUsed: isFallback,
+            durationMs: totalDuration,
+            status: "success",
+            finishReason,
+            responseLength: rawText.length
+          }
+        };
+      }
+
+      // Record detailed Zod issues
+      const issues = zodValidation.error.issues.map(i => ({
+        path: i.path.join("."),
+        code: i.code,
+        message: i.message,
+        expected: (i as any).expected,
+        received: (i as any).received
+      }));
+      lastValidationError = issues;
+      console.warn(`[InstaScore Pipeline] [${params.requestId}] Zod validation failed for ${currentModel}. Invalid fields:`, JSON.stringify(issues));
+    }
+
+    // Step 4: Fast Correctional Retry (1 attempt per model)
+    console.log(`[InstaScore Pipeline] [${params.requestId}] Invoking targeted correctional retry for ${currentModel}...`);
+    totalCalls++;
+    retries++;
+
+    const correctionPrompt = `A análise gerada anteriormente não atendeu estritamente à validação Zod.
+Erros específicos de validação identificados:
+${JSON.stringify(lastValidationError || "JSON_PARSE_ERROR", null, 2)}
+
+Conteúdo bruto a ser corrigido:
+${rawText.slice(0, 4000)}
+
+Diretrizes obrigatórias de correção:
+1. methodology_version: "instascore-structural-0.1-alpha"
+2. analysis_type: "structural"
+3. metadata: { is_data_sufficient: boolean, missing_elements: string[], overall_confidence: number de 0 a 1 }
+4. evaluations: array contendo todos os critérios avaliados com { criterion_id: string, grade: integer de 0 a 4 ou null, confidence: number de 0 a 1, evidence: string, justification: string }
+5. strengths: array de no máximo 3 itens { criterion_id: string, title: string, reason: string }
+6. critical_gaps: array de no máximo 5 itens { criterion_id: string, title: string, reason: string, impact: string }
+7. recommended_actions: array de no máximo 5 itens { criterion_id: string, title: string, instruction: string, effort: "low" | "medium" | "high", expected_effect: string }
+8. tomorrow_action: { criterion_id: string, title: string, instruction: string }
+9. disclaimer: string
+
+Retorne EXCLUSIVAMENTE o JSON estruturado corrigido.`;
+
+    try {
+      const ai = getGoogleGenAI();
+      const retryResponse = await ai.models.generateContent({
+        model: currentModel,
+        contents: [{ text: correctionPrompt }],
+        config: {
+          systemInstruction: params.systemInstruction,
+          responseMimeType: "application/json",
+          responseSchema: params.responseSchema,
+          temperature: 0.1
+        }
+      });
+
+      const retryRawText = retryResponse.text || "";
+      if (retryRawText) {
+        const retryParsed = cleanAndParseJson(retryRawText);
+        const retryZod = DiagnosisSchema.safeParse(retryParsed);
+
+        if (retryZod.success) {
+          const totalDuration = Date.now() - overallStartTime;
+          console.log(`[InstaScore Pipeline] [${params.requestId}] Correctional retry SUCCESS on ${currentModel} in ${totalDuration}ms`);
+          return {
+            parsedDiagnosis: retryZod.data,
+            meta: {
+              modelUsed: currentModel,
+              totalCalls,
+              retries,
+              fallbackUsed: isFallback,
+              durationMs: totalDuration,
+              status: "success",
+              finishReason: retryResponse.candidates?.[0]?.finishReason || "STOP",
+              responseLength: retryRawText.length
+            }
+          };
         } else {
-          // If not transient, or max attempts reached, exit this loop to try fallback model
-          break;
+          lastValidationError = retryZod.error.issues.map(i => ({
+            path: i.path.join("."),
+            code: i.code,
+            message: i.message
+          }));
+          console.warn(`[InstaScore Pipeline] [${params.requestId}] Correctional retry Zod failed:`, JSON.stringify(lastValidationError));
         }
       }
+    } catch (retryErr: any) {
+      console.warn(`[InstaScore Pipeline] [${params.requestId}] Correctional retry call error on ${currentModel}:`, retryErr.message || retryErr);
     }
-    console.warn(`[AI] Model ${model} failed all attempts or returned a non-transient error, attempting fallback...`);
   }
 
-  throw lastError || new Error("All Gemini models and retries failed to complete analysis.");
+  // All models and retries exhausted
+  const totalDuration = Date.now() - overallStartTime;
+  const failureError: any = new Error("ANALYSIS_VALIDATION_FAILED");
+  failureError.code = "ANALYSIS_VALIDATION_FAILED";
+  failureError.meta = {
+    modelUsed: models[models.length - 1],
+    totalCalls,
+    retries,
+    fallbackUsed: true,
+    durationMs: totalDuration,
+    status: "failed",
+    validationIssues: lastValidationError
+  };
+  throw failureError;
+}
+
+
+// Simple in-memory rate limiter & request deduplication store
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const recentRequestHashes = new Map<string, { result: any; expiresAt: number }>();
+
+function checkRateLimit(ip: string): { allowed: boolean; remaining: number } {
+  const now = Date.now();
+  const windowMs = 10 * 60 * 1000; // 10 minutes
+  const maxRequests = 10;
+
+  const record = rateLimitMap.get(ip);
+  if (!record || now > record.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, remaining: maxRequests - 1 };
+  }
+
+  if (record.count >= maxRequests) {
+    return { allowed: false, remaining: 0 };
+  }
+
+  record.count++;
+  return { allowed: true, remaining: maxRequests - record.count };
 }
 
 app.post("/api/analyze", async (req, res) => {
-  console.log("[InstaScore] Request received");
+  const clientIp = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
+  const rateLimit = checkRateLimit(clientIp);
+  if (!rateLimit.allowed) {
+    console.warn(`[InstaScore RateLimit] IP ${clientIp} exceeded limit`);
+    return res.status(429).json({
+      success: false,
+      error: "RATE_LIMIT_EXCEEDED",
+      message: "Muitas solicitações enviadas em curto intervalo. Aguarde alguns minutos e tente novamente."
+    });
+  }
+
+  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+
+  // ENFORCE BACKEND QUOTA CHECK BEFORE INVOKING EXPENSIVE GEMINI API
+  const quotaCheck = checkAndIncrementQuota(userId, "DIAGNOSIS");
+  if (!quotaCheck.allowed) {
+    console.warn(`[InstaScore Quota] User ${userId} blocked: ${quotaCheck.errorCode}`);
+    return res.status(403).json({
+      success: false,
+      error: quotaCheck.errorCode,
+      message: quotaCheck.message,
+      paywallRequired: true,
+      currentCount: quotaCheck.currentCount,
+      maxLimit: quotaCheck.maxLimit
+    });
+  }
+
+  console.log("[InstaScore] Request received from IP:", clientIp, "for user:", userId);
   try {
     const { userName, niche, objective, targetAudience, handle, print1, print2, print3, consent } = req.body;
 
@@ -390,108 +1974,51 @@ Por favor, analise as capturas e preencha todos os 25 critérios obrigatórios d
 
     parts.push({ text: contextPrompt });
 
-    // AI model call with response schema
-    let responseText = "";
-    let parsedDiagnosis: any = null;
-    let stage: "gemini_api_call" | "structured_output_validation" = "gemini_api_call";
+    // Unique request trace ID for observability
+    const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
+    // Execute analysis pipeline with Zod validation, retry, and fallback
+    let pipelineResult: { parsedDiagnosis: any; meta: AIExecutionMeta };
     try {
-      console.log(`[InstaScore] Calling Gemini API...`);
-      const response = await callGeminiWithRetryAndFallback({
+      pipelineResult = await executeAnalysisPipeline({
         parts,
         systemInstruction: SYSTEM_INSTRUCTION,
         responseSchema: GEMINI_RESPONSE_SCHEMA,
-        temperature: 0.2
+        requestId
       });
-
-      responseText = response.text || "";
-      console.log("[InstaScore] Gemini response received");
-      parsedDiagnosis = JSON.parse(responseText);
-
-      stage = "structured_output_validation";
-      // Zod Validation
-      DiagnosisSchema.parse(parsedDiagnosis);
-      console.log("[InstaScore] Structured output validated");
-    } catch (firstError: any) {
-      if (firstError.name === "ZodError") {
-        const issues = firstError.issues.map((issue: any) => ({
-          path: issue.path.join("."),
-          code: issue.code,
-          expected: issue.expected,
-          received: issue.received
-        }));
-        console.warn("[InstaScore] Structured output validation failed. Invalid fields:", JSON.stringify(issues));
-      } else {
-        console.warn("[InstaScore] First execution or validation attempt failed:", firstError.message || firstError);
-      }
+    } catch (pipelineErr: any) {
+      console.error(`[InstaScore Pipeline] [${requestId}] Execution error:`, pipelineErr.message || pipelineErr);
       
-      console.log("[InstaScore] Attempting correctional retry...");
-      stage = "gemini_api_call";
-
-      // Automatic single retry with correctional instructions
-      const correctionPrompt = `A tentativa anterior de gerar a análise falhou com o seguinte erro de validação ou estrutura:
-"${firstError.message || firstError}"
-
-Por favor, reanalise e certifique-se de que:
-1. Todos os 25 critérios estão presentes em 'evaluations' com seus IDs exatos e notas válidas de 0 a 4 (ou null se ausente).
-2. 'strengths' tem no máximo 3 itens.
-3. 'critical_gaps' tem no máximo 5 itens.
-4. 'recommended_actions' tem no máximo 5 ou 10 itens válidos (preferencialmente 5 ações estratégicas).
-5. 'tomorrow_action' e 'disclaimer' estão preenchidos de forma consistente.
-6. A saída seja estritamente compatível com o JSON Schema exigido.
-
-Retorne o JSON de diagnóstico corrigido imediatamente.`;
-
-      // Copy original screenshots and add the correction text
-      const retryParts = [...parts, { text: correctionPrompt }];
-
-      try {
-        const retryResponse = await callGeminiWithRetryAndFallback({
-          parts: retryParts,
-          systemInstruction: SYSTEM_INSTRUCTION,
-          responseSchema: GEMINI_RESPONSE_SCHEMA,
-          temperature: 0.1
+      if (pipelineErr.code === "ANALYSIS_VALIDATION_FAILED") {
+        return res.status(422).json({
+          success: false,
+          error: "ANALYSIS_VALIDATION_FAILED",
+          message: "Não conseguimos concluir esta análise agora. Seus dados não foram perdidos. Tente novamente em alguns instantes.",
+          diagnostic_info: {
+            requestId,
+            stage: "structured_output_validation",
+            modelUsed: pipelineErr.meta?.modelUsed,
+            totalCalls: pipelineErr.meta?.totalCalls,
+            fallbackUsed: pipelineErr.meta?.fallbackUsed,
+            issues: pipelineErr.meta?.validationIssues
+          }
         });
-
-        responseText = retryResponse.text || "";
-        console.log("[InstaScore] Gemini response received");
-        parsedDiagnosis = JSON.parse(responseText);
-
-        stage = "structured_output_validation";
-        // Final validation (will throw if it fails again, caught by internal catch)
-        DiagnosisSchema.parse(parsedDiagnosis);
-        console.log("[InstaScore] Structured output validated");
-      } catch (retryError: any) {
-        if (retryError.name === "ZodError") {
-          const issues = retryError.issues.map((issue: any) => ({
-            path: issue.path.join("."),
-            code: issue.code,
-            expected: issue.expected,
-            received: issue.received
-          }));
-          console.error("[InstaScore] Final Structured output validation failed:", JSON.stringify(issues));
-          return res.status(422).json({
-            success: false,
-            error: "ANALYSIS_VALIDATION_FAILED",
-            message: "Recebemos uma resposta incompleta durante a análise. Tente novamente.",
-            stage: "structured_output_validation"
-          });
-        } else {
-          console.error("[InstaScore] Correctional retry call failed:", retryError.message || retryError);
-          return res.status(500).json({
-            success: false,
-            error: "ANALYSIS_FAILED",
-            message: "Recebemos uma resposta incompleta durante a análise. Tente novamente.",
-            stage: stage
-          });
-        }
       }
+
+      return res.status(500).json({
+        success: false,
+        error: "ANALYSIS_FAILED",
+        message: "Ocorreu uma instabilidade temporária no processamento da IA. Tente novamente em instantes.",
+        requestId
+      });
     }
 
-    // Now, run the mathematical calculations in the backend to determine scores
+    const { parsedDiagnosis, meta: aiExecutionMeta } = pipelineResult;
+
+    // Run mathematical calculations in backend (AI must NEVER calculate scores)
     const evaluations = parsedDiagnosis.evaluations;
 
-    // Check if any required criteria are missing, fill them as null to prevent crash
+    // Ensure all 25 criteria are present in evaluations array
     const criteriaIdsInResponse = new Set(evaluations.map((e: any) => e.criterion_id));
     for (const criterion of CRITERIA) {
       if (!criteriaIdsInResponse.has(criterion.id)) {
@@ -499,21 +2026,98 @@ Retorne o JSON de diagnóstico corrigido imediatamente.`;
           criterion_id: criterion.id,
           grade: null,
           confidence: 0,
-          evidence: "Informação ausente nas imagens analisadas.",
-          justification: "Não foi possível coletar evidências estruturais suficientes para avaliar este critério."
+          evidence: "Informação não visível ou ausente nas capturas enviadas.",
+          justification: "Critério não identificado nas evidências disponíveis."
         });
       }
     }
 
-    // Recalculate deterministic scoring
+    // Deterministic Math Engine scoring calculation
     const scoringResult = calculateScoring(evaluations, objective);
-    console.log("[InstaScore] Score calculated");
+    console.log(`[InstaScore Pipeline] [${requestId}] Deterministic Math Engine calculated score=${scoringResult.score}, coverage=${scoringResult.coverage}%`);
 
-    console.log("[InstaScore] Response sent");
+
+    // TEST 3: Invalid images & data sufficiency check
+    if (!parsedDiagnosis.metadata?.is_data_sufficient || scoringResult.coverage < 15) {
+      const missingReason = (parsedDiagnosis.metadata?.missing_elements && parsedDiagnosis.metadata.missing_elements.length > 0)
+        ? parsedDiagnosis.metadata.missing_elements.join("; ")
+        : "Não foram encontradas evidências de um perfil do Instagram nas imagens enviadas.";
+      console.warn("[InstaScore] Invalid or insufficient image data detected:", missingReason);
+      return res.status(400).json({
+        success: false,
+        error: "IMAGEM_INVALIDA_OU_INSUFICIENTE",
+        message: `As imagens enviadas não parecem conter as informações de um perfil do Instagram visível. ${missingReason}`,
+        missing_elements: parsedDiagnosis.metadata?.missing_elements || []
+      });
+    }
+
+    // TEST 6: Priority alignment - ensure tomorrow_action and recommended_actions follow math engine
+    const { getPrioritizedActions } = await import("./src/config/methodology");
+    const prioritized = getPrioritizedActions(evaluations, objective);
+    if (prioritized.length > 0) {
+      const top1Id = prioritized[0].criterion_id;
+      if (parsedDiagnosis.tomorrow_action && parsedDiagnosis.tomorrow_action.criterion_id !== top1Id) {
+        const matchingAction = parsedDiagnosis.recommended_actions?.find((a: any) => a.criterion_id === top1Id);
+        if (matchingAction) {
+          parsedDiagnosis.tomorrow_action = {
+            criterion_id: top1Id,
+            title: matchingAction.title,
+            instruction: matchingAction.instruction
+          };
+        } else {
+          parsedDiagnosis.tomorrow_action.criterion_id = top1Id;
+        }
+      }
+
+      // Sort recommended actions according to priority score order
+      const priorityOrderMap = new Map<string, number>();
+      prioritized.forEach((p, idx) => priorityOrderMap.set(p.criterion_id, idx));
+      if (parsedDiagnosis.recommended_actions) {
+        parsedDiagnosis.recommended_actions.sort((a: any, b: any) => {
+          const orderA = priorityOrderMap.has(a.criterion_id) ? priorityOrderMap.get(a.criterion_id)! : 99;
+          const orderB = priorityOrderMap.has(b.criterion_id) ? priorityOrderMap.get(b.criterion_id)! : 99;
+          return orderA - orderB;
+        });
+      }
+    }
+
+    // TEST 13: Complete Observability Metadata
+    const diagnosticId = `diag_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const fullMeta = {
+      diagnosticId,
+      modelUsed: aiExecutionMeta?.modelUsed || AI_MODEL_ROUTER.primaryModel,
+      totalCalls: aiExecutionMeta?.totalCalls || 1,
+      retries: aiExecutionMeta?.retries || 0,
+      fallbackUsed: aiExecutionMeta?.fallbackUsed || false,
+      durationMs: aiExecutionMeta?.durationMs || 0,
+      status: "success",
+      validationStatus: "valid",
+      coverage: scoringResult.coverage,
+      score: scoringResult.score,
+      methodologyVersion: parsedDiagnosis.methodology_version,
+      promptVersion: "1.0.0"
+    };
+
+    // Log AI execution cost for Observability
+    logAiExecutionCost({
+      userId,
+      diagnosticId,
+      action: "diagnosis_multimodal",
+      modelUsed: aiExecutionMeta?.modelUsed || AI_MODEL_ROUTER.primaryModel,
+      durationMs: aiExecutionMeta?.durationMs || 0,
+      retries: aiExecutionMeta?.retries || 0,
+      fallbackUsed: aiExecutionMeta?.fallbackUsed || false,
+      inputTokens: 2400,
+      outputTokens: 1900
+    });
+
+    console.log("[InstaScore Observability]", JSON.stringify(fullMeta));
+
     return res.json({
       success: true,
       diagnosis: parsedDiagnosis,
-      scoring: scoringResult
+      scoring: scoringResult,
+      meta: fullMeta
     });
 
   } catch (error: any) {

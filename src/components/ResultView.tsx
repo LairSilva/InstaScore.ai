@@ -3,14 +3,23 @@ import { motion } from "motion/react";
 import { 
   Share2, RefreshCw, CheckCircle, AlertCircle, TrendingUp, 
   ChevronRight, ArrowRight, Target, Users, Zap, LayoutTemplate,
-  Sparkles, ShieldCheck, Flame, Compass, Eye, Layers
+  Sparkles, ShieldCheck, Flame, Compass, Eye, Layers, Lock,
+  FileText, Check, BarChart3
 } from "lucide-react";
 import { AnalysisResponse } from "../types";
 import { DigitalTwin } from "../core/DigitalTwin";
 import { CategoryResult, CRITERIA } from "../config/methodology";
+import { ProContentGenerator } from "./ProContentGenerator";
+import { useEntitlements } from "../hooks/useEntitlements";
+import { MissionDeliverableModal } from "./MissionDeliverableModal";
+import { MissionExecutionResult, MissionType, BioModifier } from "../types/missions";
+import { StrategicDashboard } from "./strategic/StrategicDashboard";
+import { ContentLab } from "./strategic/ContentLab";
+import { ProfileDNAService } from "../engine/strategic/ProfileDNAService";
+import { ProfileDNA } from "../types/strategic-brain";
 
 interface ResultViewProps {
-  digitalTwin: DigitalTwin;
+  digitalTwin?: DigitalTwin | null;
   diagnosisResult: AnalysisResponse;
   isDemoMode: boolean;
   userName: string;
@@ -30,8 +39,16 @@ export function ResultView({
   onReset,
   onShare,
 }: ResultViewProps) {
+  const { openPaywall, userId } = useEntitlements();
   const { scoring, diagnosis } = diagnosisResult;
-  const currentScore = scoring.score || 0;
+  const currentScore = scoring?.score || 0;
+  
+  // Mission Modal state
+  const [isMissionModalOpen, setIsMissionModalOpen] = useState(false);
+  const [activeMissionResult, setActiveMissionResult] = useState<MissionExecutionResult | null>(null);
+  const [missionLoading, setMissionLoading] = useState(false);
+  const [missionLoadingStage, setMissionLoadingStage] = useState("Iniciando IA estratégica...");
+  const [activeBioModifier, setActiveBioModifier] = useState<BioModifier>("default");
   
   // Fake benchmarks for premium feeling
   const nicheAvg = Math.max(0, Math.round(currentScore * 0.65));
@@ -46,16 +63,94 @@ export function ResultView({
   const nextLevelXP = userLevel * 20 * 125;
   const progressToNextLevel = ((userXP - ((userLevel - 1) * 20 * 125)) / (nextLevelXP - ((userLevel - 1) * 20 * 125))) * 100;
   
-  const executionScore = digitalTwin.metrics.executionScore;
-  const consistencyScore = digitalTwin.metrics.consistencyScore;
-  const momentumScore = digitalTwin.metrics.momentumScore;
-  const cageScore = digitalTwin.metrics.overallScore;
+  const twinMetrics = digitalTwin?.metrics || {
+    executionScore: Math.round(currentScore * 0.95),
+    consistencyScore: Math.round(currentScore * 0.9),
+    momentumScore: Math.round(currentScore * 0.85),
+    overallScore: currentScore,
+  };
+  const executionScore = twinMetrics.executionScore;
+  const consistencyScore = twinMetrics.consistencyScore;
+  const momentumScore = twinMetrics.momentumScore;
+  const cageScore = twinMetrics.overallScore;
 
   // Timeline completion state
   const [completedSteps, setCompletedSteps] = useState<Record<number, boolean>>({});
 
+  // Active View Tab State (V12 Strategic Brain integration)
+  const [activeTab, setActiveTab] = useState<'strategy' | 'content_lab' | 'audit' | 'pro_tools'>('strategy');
+
+  // Initialized DNA based on diagnosis
+  const [profileDna, setProfileDna] = useState<ProfileDNA>(() => {
+    const cleanHandle = (handle || userName || 'usuario').replace('@', '');
+    const criticalGapStr = diagnosis?.critical_gaps?.[0]?.title || 'Ganchos dos primeiros 3 segundos e clareza de posicionamento';
+    const strengthStr = diagnosis?.strengths?.[0]?.title || 'Conhecimento técnico no nicho';
+    
+    return ProfileDNAService.createDefaultDNA(cleanHandle, userId || 'anonymous', {
+      niche: niche || 'Negócios e Serviços',
+      account_name: userName || cleanHandle,
+      username: cleanHandle,
+      audience_pain: criticalGapStr,
+      strengths: [strengthStr],
+      weaknesses: diagnosis?.critical_gaps?.map(g => g.title) || []
+    });
+  });
+
   const toggleStep = (idx: number) => {
     setCompletedSteps(prev => ({ ...prev, [idx]: !prev[idx] }));
+  };
+
+  const handleExecuteMission = async (
+    missionType: MissionType,
+    gap?: { criterion_id?: string; title?: string; impact?: string; reason?: string },
+    modifier: BioModifier = "default"
+  ) => {
+    setIsMissionModalOpen(true);
+    setMissionLoading(true);
+    setActiveBioModifier(modifier);
+    setMissionLoadingStage("Consultando IA especializada e parâmetros do diagnóstico...");
+
+    try {
+      const res = await fetch("/api/mission/execute", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-id": userId
+        },
+        body: JSON.stringify({
+          userId,
+          missionType,
+          criterionId: gap?.criterion_id,
+          criterionTitle: gap?.title,
+          criterionImpact: gap?.impact || gap?.reason,
+          userName: userName || "Criador",
+          handle: handle || "@usuario",
+          niche: niche || "Geral",
+          objective: "Crescimento e Conversão",
+          targetAudience: "Público Alvo do Nicho",
+          currentBio: (diagnosis as any)?.bio_analysis?.verbatim_text || "",
+          currentName: userName,
+          score: currentScore,
+          identifiedGaps: diagnosis.critical_gaps,
+          modifier
+        })
+      });
+
+      const data = await res.json();
+      if (data.success && data.result) {
+        setActiveMissionResult(data.result);
+      } else {
+        throw new Error(data.message || "Falha na execução da missão");
+      }
+    } catch (err) {
+      console.error("Mission execution error:", err);
+    } finally {
+      setMissionLoading(false);
+    }
+  };
+
+  const handleRegenerateBio = (modifier: BioModifier) => {
+    handleExecuteMission("bio_generator_pro", { criterion_id: "bio_clarity_positioning" }, modifier);
   };
 
   return (
@@ -135,8 +230,90 @@ export function ResultView({
         </div>
       </div>
 
-      {/* 2. Hero Score Experience with Pulsing Halo */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+      {/* Strategic Navigation Tabs */}
+      <div className="flex items-center gap-2 p-1.5 bg-[#0b0f19] border border-white/10 rounded-2xl overflow-x-auto max-w-full">
+        <button
+          type="button"
+          id="tab_strategy"
+          onClick={() => setActiveTab('strategy')}
+          className={`flex items-center gap-2 px-5 py-3 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap transition-all ${
+            activeTab === 'strategy'
+              ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 shadow-lg shadow-emerald-500/20'
+              : 'text-gray-400 hover:text-white hover:bg-white/5'
+          }`}
+        >
+          <Compass size={16} />
+          <span>Sua Estratégia & DNA</span>
+        </button>
+
+        <button
+          type="button"
+          id="tab_content_lab"
+          onClick={() => setActiveTab('content_lab')}
+          className={`flex items-center gap-2 px-5 py-3 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap transition-all ${
+            activeTab === 'content_lab'
+              ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 shadow-lg shadow-emerald-500/20'
+              : 'text-gray-400 hover:text-white hover:bg-white/5'
+          }`}
+        >
+          <Sparkles size={16} />
+          <span>Content Lab (PRO)</span>
+        </button>
+
+        <button
+          type="button"
+          id="tab_audit"
+          onClick={() => setActiveTab('audit')}
+          className={`flex items-center gap-2 px-5 py-3 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap transition-all ${
+            activeTab === 'audit'
+              ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 shadow-lg shadow-emerald-500/20'
+              : 'text-gray-400 hover:text-white hover:bg-white/5'
+          }`}
+        >
+          <BarChart3 size={16} />
+          <span>Diagnóstico & C.A.G.E.</span>
+        </button>
+
+        <button
+          type="button"
+          id="tab_pro_tools"
+          onClick={() => setActiveTab('pro_tools')}
+          className={`flex items-center gap-2 px-5 py-3 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap transition-all ${
+            activeTab === 'pro_tools'
+              ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 shadow-lg shadow-emerald-500/20'
+              : 'text-gray-400 hover:text-white hover:bg-white/5'
+          }`}
+        >
+          <Zap size={16} />
+          <span>Central PRO</span>
+        </button>
+      </div>
+
+      {/* Tab 1: Strategic Dashboard (Profile DNA & Clarity Score) */}
+      {activeTab === 'strategy' && (
+        <StrategicDashboard
+          initialDna={profileDna}
+          username={(handle || userName || 'usuario').replace('@', '')}
+          onOpenContentLab={() => setActiveTab('content_lab')}
+          onOpenPaywall={() => openPaywall()}
+          isPro={true}
+        />
+      )}
+
+      {/* Tab 2: Content Lab */}
+      {activeTab === 'content_lab' && (
+        <ContentLab
+          dna={profileDna}
+          onOpenPaywall={() => openPaywall()}
+          isPro={true}
+        />
+      )}
+
+      {/* Tab 3: Diagnostic & C.A.G.E. Audit Details */}
+      {activeTab === 'audit' && (
+        <div className="space-y-12">
+          {/* 2. Hero Score Experience with Pulsing Halo */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         
         {/* Main Score Display with Ambient Light Halo */}
         <div className="lg:col-span-5 glass-panel rounded-3xl p-8 relative overflow-hidden flex flex-col justify-center items-center text-center shadow-2xl border border-white/10">
@@ -344,40 +521,96 @@ export function ResultView({
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-          {diagnosis.critical_gaps.slice(0, 4).map((gap, idx) => (
-            <motion.div 
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ delay: idx * 0.1 }}
-              key={idx}
-              className="glass-panel glass-panel-hover rounded-3xl p-6 flex flex-col justify-between group space-y-5 border border-white/10"
-            >
-              <div className="space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-mono font-bold text-[#FF5E36] tracking-wider uppercase">
-                    MISSÃO 0{idx + 1}
-                  </span>
-                  <span className="px-2.5 py-0.5 rounded-full bg-[#E1306C]/20 text-[#FA26A0] border border-[#E1306C]/30 text-[10px] font-bold uppercase font-mono">
-                    Impacto Alto
-                  </span>
-                </div>
-                
-                <h3 className="font-bold text-lg text-white font-display leading-snug">{gap.title}</h3>
-                <p className="text-xs text-slate-300 leading-relaxed">{gap.impact}</p>
-              </div>
+          {diagnosis.critical_gaps.slice(0, 4).map((gap, idx) => {
+            const cid = (gap.criterion_id || "").toLowerCase();
+            let missionType: MissionType = "custom_mission_resolver";
+            let buttonLabel = "Resolver esta Missão com IA";
 
-              {/* Tactical Action Trigger */}
-              <button className="w-full py-3.5 px-4 bg-[#0F1424] hover:bg-[#182038] border border-white/15 hover:border-[#E1306C]/50 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg cursor-pointer">
-                <Zap size={15} className="text-[#FF5E36]" />
-                {gap.criterion_id.includes("bio") ? "Gerar Nova Bio com IA" : 
-                 gap.criterion_id.includes("cta") ? "Criar Chamadas de Conversão" :
-                 gap.criterion_id.includes("highlight") ? "Estruturar Destaques Estratégicos" :
-                 gap.criterion_id.includes("seo") ? "Otimizar Nome para Buscas" :
-                 "Resolver esta Missão com IA"}
-              </button>
-            </motion.div>
-          ))}
+            if (cid.includes("seo") || cid.includes("name") || cid.includes("nome")) {
+              missionType = "seo_name_optimization";
+              buttonLabel = "Otimizar Nome & SEO com IA";
+            } else if (cid.includes("highlight") || cid.includes("destaque")) {
+              missionType = "strategic_highlights";
+              buttonLabel = "Estruturar Destaques Estratégicos";
+            } else if (cid.includes("human") || cid.includes("pessoal") || cid.includes("rostos")) {
+              missionType = "humanization_plan";
+              buttonLabel = "Criar Plano de Humanização";
+            } else if (cid.includes("authority") || cid.includes("prova") || cid.includes("autoridade")) {
+              missionType = "authority_strategy";
+              buttonLabel = "Gerar Estratégia de Autoridade";
+            } else if (cid.includes("bio") || cid.includes("posicionamento") || cid.includes("proposta")) {
+              missionType = "bio_generator_pro";
+              buttonLabel = "Gerar 5 Bios com IA";
+            }
+
+            return (
+              <motion.div 
+                initial={{ opacity: 0, y: 20 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ delay: idx * 0.1 }}
+                key={idx}
+                className="glass-panel glass-panel-hover rounded-3xl p-6 flex flex-col justify-between group space-y-5 border border-white/10"
+              >
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs font-mono font-bold text-[#FF5E36] tracking-wider uppercase">
+                      MISSÃO 0{idx + 1}
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded-full bg-[#E1306C]/20 text-[#FA26A0] border border-[#E1306C]/30 text-[10px] font-bold uppercase font-mono">
+                      Impacto Alto
+                    </span>
+                  </div>
+                  
+                  <h3 className="font-bold text-lg text-white font-display leading-snug">{gap.title}</h3>
+                  <p className="text-xs text-slate-300 leading-relaxed">{gap.impact}</p>
+                </div>
+
+                {/* Tactical Action Trigger */}
+                <button 
+                  type="button"
+                  onClick={() => handleExecuteMission(missionType, gap)}
+                  className="w-full py-3.5 px-4 bg-gradient-to-r from-[#0F1424] to-[#182038] hover:from-[#182038] hover:to-[#222C4E] border border-white/15 hover:border-[#E1306C]/50 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg cursor-pointer active:scale-98"
+                >
+                  <Zap size={15} className="text-[#FF5E36]" />
+                  <span>{buttonLabel}</span>
+                </button>
+              </motion.div>
+            );
+          })}
+        </div>
+
+        {/* Dedicated Bio Generator Action Card */}
+        <div className="glass-panel rounded-3xl p-6 sm:p-8 border border-white/15 bg-gradient-to-br from-[#130E26]/80 via-[#0A0E1A] to-[#0A1826] space-y-4 shadow-xl">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 text-indigo-400 text-xs font-mono font-bold uppercase tracking-wider">
+              <Sparkles size={14} className="text-[#FA26A0]" />
+              <span>Bio Engine V12 — 5 Arquétipos Estratégicos</span>
+            </div>
+            <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] font-mono font-bold">
+              ✓ Zero Clichês
+            </span>
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <h3 className="text-xl sm:text-2xl font-bold text-white font-display">
+                Gerador de Bios de Alta Conversão
+              </h3>
+              <p className="text-xs sm:text-sm text-slate-300 max-w-xl leading-relaxed">
+                Gere 5 opções exclusivas (Autoridade, Conversão, Posicionamento, Humana e Premium) alinhadas aos gargalos do seu diagnóstico.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => handleExecuteMission("bio_generator_pro", { criterion_id: "bio_clarity_positioning" })}
+              className="px-6 py-3.5 rounded-2xl font-bold text-xs bg-gradient-to-r from-[#FF5E36] via-[#E1306C] to-[#833AB4] hover:opacity-95 text-white shadow-xl shadow-[#FF5E36]/20 transition-all flex items-center gap-2 cursor-pointer shrink-0 active:scale-98"
+            >
+              <Sparkles size={16} />
+              <span>Gerar 5 Bios Estratégicas</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -449,7 +682,36 @@ export function ResultView({
          </div>
       </div>
 
+      {/* Pro AI Content Generator & Resolution Hub */}
+        </div>
+      )}
+
+      {/* Tab 4: Pro AI Content Generator & Resolution Hub */}
+      {activeTab === 'pro_tools' && (
+        <ProContentGenerator
+          niche={niche || "Geral"}
+          objective="Vendas & Conversão"
+          targetAudience="Público Alvo Qualificado"
+          criticalGaps={diagnosis?.critical_gaps?.map(g => `${g.title}: ${g.reason}`) || []}
+          strengths={diagnosis?.strengths?.map(s => `${s.title}: ${s.reason}`) || []}
+          score={currentScore}
+          handle={handle}
+          onOpenPaywall={() => openPaywall()}
+        />
+      )}
+
+      {/* Mission Execution & Deliverable Modal */}
+      <MissionDeliverableModal
+        isOpen={isMissionModalOpen}
+        onClose={() => setIsMissionModalOpen(false)}
+        missionResult={activeMissionResult}
+        loading={missionLoading}
+        loadingStage={missionLoadingStage}
+        onRegenerateBio={handleRegenerateBio}
+        activeBioModifier={activeBioModifier}
+        onOpenPaywall={() => openPaywall()}
+      />
+
     </motion.div>
   );
 }
-

@@ -37,6 +37,33 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "userId", "handle"]
+    },
+    "ProfileDNA": {
+      "title": "ProfileDNA",
+      "description": "InstaScore V12 Strategic Profile DNA Structure",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "username": { "type": "string", "maxLength": 100 },
+        "niche": { "type": "string", "maxLength": 100 },
+        "positioning": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "username"]
+    },
+    "PerformanceRecord": {
+      "title": "PerformanceRecord",
+      "description": "Historical Post Performance Memory Record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "format": { "type": "string" },
+        "objective": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId"]
     }
   },
   "firestore": {
@@ -51,6 +78,14 @@
     "/digital_twins/{twinId}": {
       "schema": { "$ref": "#/entities/DigitalTwin" },
       "description": "Collection storing Digital Twin states"
+    },
+    "/profile_dna/{dnaId}": {
+      "schema": { "$ref": "#/entities/ProfileDNA" },
+      "description": "Collection storing Strategic Profile DNA"
+    },
+    "/performance_memory/{recordId}": {
+      "schema": { "$ref": "#/entities/PerformanceRecord" },
+      "description": "Collection storing Performance Memory records"
     }
   }
 }

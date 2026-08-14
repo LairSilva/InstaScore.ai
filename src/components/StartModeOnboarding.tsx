@@ -41,19 +41,40 @@ export default function StartModeOnboarding({ onComplete, onCancel }: StartModeO
     { label: "Monetizar conteúdo", desc: "Criar infoprodutos, comunidade paga e parcerias" }
   ];
 
-  const handleStartGeneration = () => {
-    if (!projectIdea.trim()) return;
+  const handleStartGeneration = async () => {
+    if (!projectIdea.trim() || isGenerating) return;
     setIsGenerating(true);
 
-    setTimeout(() => {
-      const input: StartProjectInput = {
-        projectIdea,
-        objective
-      };
-      const result = generateStartModeStrategy(input);
+    const input: StartProjectInput = {
+      projectIdea,
+      objective
+    };
+
+    try {
+      const res = await fetch("/api/start-mode/generate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          projectIdea,
+          objective
+        })
+      });
+
+      const data = await res.json();
+      if (data.success && data.result) {
+        setIsGenerating(false);
+        onComplete(data.result);
+        return;
+      }
+      throw new Error(data.message || "Erro na geração");
+    } catch (err) {
+      console.warn("[Start Mode AI] Falling back to deterministic engine:", err);
+      const fallbackResult = generateStartModeStrategy(input);
       setIsGenerating(false);
-      onComplete(result);
-    }, 2200);
+      onComplete(fallbackResult);
+    }
   };
 
   return (

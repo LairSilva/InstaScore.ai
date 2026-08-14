@@ -7,12 +7,20 @@ service cloud.firestore {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
     function isSignedIn() {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
+    function isOwner() {
+      return isSignedIn() && resource != null && resource.data.userId == request.auth.uid;
     }
 
     // Default deny all
@@ -20,25 +28,82 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Connection test document
+    match /test/{docId} {
+      allow read: if isValidId(docId);
+    }
+
     // Diagnoses collection
     match /diagnoses/{diagnosisId} {
-      allow read: if isValidId(diagnosisId) && (resource == null || resource.data.userId == request.auth.uid || resource.data.userId == "anonymous");
-      allow create: if isValidId(diagnosisId) && (request.resource.data.userId == request.auth.uid || request.resource.data.userId == "anonymous");
-      allow update, delete: if isValidId(diagnosisId) && isSignedIn() && (resource.data.userId == request.auth.uid);
+      allow read: if isValidId(diagnosisId);
+      allow create, update: if isValidId(diagnosisId) && (
+        (isSignedIn() && incoming().userId == request.auth.uid) ||
+        (!isSignedIn() && incoming().userId is string && incoming().userId.size() <= 128)
+      );
+      allow delete: if isValidId(diagnosisId) && isOwner();
     }
 
     // Start Projects collection
     match /start_projects/{projectId} {
-      allow read: if isValidId(projectId) && (resource == null || resource.data.userId == request.auth.uid || resource.data.userId == "anonymous");
-      allow create: if isValidId(projectId) && (request.resource.data.userId == request.auth.uid || request.resource.data.userId == "anonymous");
-      allow update, delete: if isValidId(projectId) && isSignedIn() && (resource.data.userId == request.auth.uid);
+      allow read: if isValidId(projectId);
+      allow create, update: if isValidId(projectId) && (
+        (isSignedIn() && incoming().userId == request.auth.uid) ||
+        (!isSignedIn() && incoming().userId is string && incoming().userId.size() <= 128)
+      );
+      allow delete: if isValidId(projectId) && isOwner();
     }
 
     // Digital Twins collection
     match /digital_twins/{twinId} {
-      allow read: if isValidId(twinId) && (resource == null || resource.data.userId == request.auth.uid || resource.data.userId == "anonymous");
-      allow create, update: if isValidId(twinId) && (request.resource.data.userId == request.auth.uid || request.resource.data.userId == "anonymous");
-      allow delete: if isValidId(twinId) && isSignedIn() && (resource.data.userId == request.auth.uid);
+      allow read: if isValidId(twinId);
+      allow create, update: if isValidId(twinId) && (
+        (isSignedIn() && incoming().userId == request.auth.uid) ||
+        (!isSignedIn() && incoming().userId is string && incoming().userId.size() <= 128)
+      );
+      allow delete: if isValidId(twinId) && isOwner();
+    }
+
+    // Profile DNA collection (Strategic Brain)
+    match /profile_dna/{dnaId} {
+      allow read: if isValidId(dnaId);
+      allow create, update: if isValidId(dnaId) && (
+        (isSignedIn() && incoming().userId == request.auth.uid) ||
+        (!isSignedIn() && incoming().userId is string && incoming().userId.size() <= 128)
+      );
+      allow delete: if isValidId(dnaId) && isOwner();
+    }
+
+    // Performance Memory collection
+    match /performance_memory/{recordId} {
+      allow read: if isValidId(recordId);
+      allow create, update: if isValidId(recordId) && (
+        (isSignedIn() && incoming().userId == request.auth.uid) ||
+        (!isSignedIn() && incoming().userId is string && incoming().userId.size() <= 128)
+      );
+      allow delete: if isValidId(recordId) && isOwner();
+    }
+
+    // Subscriptions collection (Read by owner or server, write restricted to owner's own default record or server)
+    match /subscriptions/{userId} {
+      allow read: if isValidId(userId) && (resource == null || resource.data.userId == request.auth.uid || userId == request.auth.uid);
+      allow create, update: if isValidId(userId) && isSignedIn() && request.auth.uid == userId && (incoming().plan == 'FREE' || resource == null);
+      allow delete: if false;
+    }
+
+    // Usage tracking collection
+    match /usage/{userId} {
+      allow read: if isValidId(userId) && (resource == null || resource.data.userId == request.auth.uid || userId == request.auth.uid);
+      allow create, update: if isValidId(userId) && isSignedIn() && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
+    // Webhook Events & AI Logs (Server-only backend collections)
+    match /webhook_events/{eventId} {
+      allow read, write: if false;
+    }
+
+    match /ai_logs/{logId} {
+      allow read, write: if false;
     }
   }
 }

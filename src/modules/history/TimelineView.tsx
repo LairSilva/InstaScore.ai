@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { motion } from "motion/react";
 import { History, TrendingUp, Zap, LayoutTemplate, Star, Activity, BarChart2, CheckCircle, BrainCircuit } from "lucide-react";
 import { AnalysisResponse } from "../../types";
-import { DigitalTwin } from "../../core/DigitalTwin";
+import { DigitalTwin, createDefaultDigitalTwin } from "../../core/DigitalTwin";
 import { MemoryEngine } from "../../ai/memory/MemoryEngine";
 import { 
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, 
@@ -12,25 +12,26 @@ import {
 interface TimelineViewProps {
   diagnosisResult: AnalysisResponse;
   currentScore: number;
-  digitalTwin: DigitalTwin;
+  digitalTwin?: DigitalTwin | null;
 }
 
-export function TimelineView({ diagnosisResult, currentScore, digitalTwin }: TimelineViewProps) {
+export function TimelineView({ diagnosisResult, currentScore, digitalTwin: rawTwin }: TimelineViewProps) {
   const [activeTab, setActiveTab] = useState<"radar" | "timeline">("radar");
+  const digitalTwin = rawTwin || createDefaultDigitalTwin(diagnosisResult);
 
   const historyData = [
     { date: "12 Mar", score: Math.max(0, currentScore - 12), execution: 30, momentum: 40 },
     { date: "24 Mar", score: Math.max(0, currentScore - 5), execution: 55, momentum: 60 },
-    { date: "Hoje", score: currentScore, execution: digitalTwin.metrics.executionScore, momentum: digitalTwin.metrics.momentumScore }
+    { date: "Hoje", score: currentScore, execution: digitalTwin.metrics?.executionScore || 45, momentum: digitalTwin.metrics?.momentumScore || 50 }
   ];
 
   const radarData = [
-    { subject: 'Autoridade', A: digitalTwin.metrics.authorityVelocity, fullMark: 100 },
-    { subject: 'Crescimento', A: digitalTwin.metrics.growthVelocity, fullMark: 100 },
-    { subject: 'Conversão', A: digitalTwin.metrics.conversionVelocity, fullMark: 100 },
-    { subject: 'Execução', A: digitalTwin.metrics.executionScore, fullMark: 100 },
-    { subject: 'Consistência', A: digitalTwin.metrics.consistencyScore, fullMark: 100 },
-    { subject: 'Momentum', A: digitalTwin.metrics.momentumScore, fullMark: 100 },
+    { subject: 'Autoridade', A: digitalTwin.metrics?.authorityVelocity || 50, fullMark: 100 },
+    { subject: 'Crescimento', A: digitalTwin.metrics?.growthVelocity || 50, fullMark: 100 },
+    { subject: 'Conversão', A: digitalTwin.metrics?.conversionVelocity || 50, fullMark: 100 },
+    { subject: 'Execução', A: digitalTwin.metrics?.executionScore || 50, fullMark: 100 },
+    { subject: 'Consistência', A: digitalTwin.metrics?.consistencyScore || 50, fullMark: 100 },
+    { subject: 'Momentum', A: digitalTwin.metrics?.momentumScore || 50, fullMark: 100 },
   ];
 
   const mockMemoryEvent = MemoryEngine.recordEvent(digitalTwin, {

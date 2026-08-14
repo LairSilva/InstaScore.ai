@@ -28,16 +28,18 @@ export class MemoryEngine {
 
   private static generateInsights(twin: DigitalTwin, action: Omit<MemoryNode, "id" | "timestamp" | "insights">): string[] {
     const insights: string[] = [];
+    const executionScore = twin?.metrics?.executionScore || 50;
+    const conversionVelocity = twin?.metrics?.conversionVelocity || 40;
     
     if (action.actionType === "PROFILE_UPDATE" && action.impact.scoreDelta && action.impact.scoreDelta > 0) {
-      if (twin.metrics.executionScore < 50) {
+      if (executionScore < 50) {
          insights.push("Você frequentemente melhora SEO primeiro, mas perde consistência em poucas semanas.");
       } else {
          insights.push("Mudanças estruturais no perfil estão gerando ROI consistente.");
       }
     }
     
-    if (twin.metrics.conversionVelocity < 20) {
+    if (conversionVelocity < 20) {
       insights.push("Seu maior gargalo continua sendo a conversão. Ajustes visuais não resolverão a falta de CTA.");
     }
     
@@ -46,12 +48,13 @@ export class MemoryEngine {
 
   static getHistoricalContext(twin: DigitalTwin): string[] {
     const context: string[] = [];
+    const executionScore = twin?.metrics?.executionScore || 50;
     
     if (twin.historyData && twin.historyData.events && twin.historyData.events.length > 3) {
        context.push("Usuário apresenta padrão de engajamento emocional elevado, o que gera mais retenção.");
     }
 
-    if (twin.metrics.executionScore > 70) {
+    if (executionScore > 70) {
        context.push("Alta taxa de execução. O sistema pode recomendar tarefas mais avançadas.");
     } else {
        context.push("Baixa consistência. O sistema deve sugerir micro-ações de fácil execução (Quick Wins).");

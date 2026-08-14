@@ -1,28 +1,29 @@
 import React from "react";
 import { motion } from "motion/react";
 import { Globe, Trophy, ArrowUpRight, ArrowDownRight, Users, Zap, TrendingUp, AlertTriangle, Layers } from "lucide-react";
-import { DigitalTwin } from "../../core/DigitalTwin";
+import { DigitalTwin, createDefaultDigitalTwin } from "../../core/DigitalTwin";
 import { GlobalIntelligenceEngine } from "../../engine/analytics/GlobalIntelligenceEngine";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from "recharts";
 
 interface GlobalBenchmarkViewProps {
-  digitalTwin: DigitalTwin;
+  digitalTwin?: DigitalTwin | null;
 }
 
-export function GlobalBenchmarkView({ digitalTwin }: GlobalBenchmarkViewProps) {
-  const benchmark = GlobalIntelligenceEngine.getBenchmarkForNiche(digitalTwin.identity.niche);
+export function GlobalBenchmarkView({ digitalTwin: rawTwin }: GlobalBenchmarkViewProps) {
+  const digitalTwin = rawTwin || createDefaultDigitalTwin();
+  const benchmark = GlobalIntelligenceEngine.getBenchmarkForNiche(digitalTwin.identity?.niche || "Geral");
   const comparison = GlobalIntelligenceEngine.compareTwinToGlobal(digitalTwin);
 
   const chartData = [
     {
       name: 'Score Geral',
-      "Seu Perfil": digitalTwin.metrics.overallScore,
+      "Seu Perfil": digitalTwin.metrics?.overallScore || 50,
       "Média (Nicho)": benchmark.averageScore,
       "Top 1%": benchmark.topPercentileScore,
     },
     {
       name: 'Vel. de Conversão',
-      "Seu Perfil": digitalTwin.metrics.conversionVelocity,
+      "Seu Perfil": digitalTwin.metrics?.conversionVelocity || 45,
       "Média (Nicho)": benchmark.averageConversionVelocity,
       "Top 1%": benchmark.topPercentileConversionVelocity,
     },
@@ -100,7 +101,7 @@ export function GlobalBenchmarkView({ digitalTwin }: GlobalBenchmarkViewProps) {
                     <Zap size={14} />
                   </div>
                   <span className="text-sm font-medium text-slate-300">
-                    Velocidade de Execução ({digitalTwin.metrics.executionScore})
+                    Velocidade de Execução ({digitalTwin.metrics?.executionScore || 50})
                   </span>
                 </div>
               </div>
