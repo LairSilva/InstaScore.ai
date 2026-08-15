@@ -51,6 +51,7 @@ import { MentorView } from "./modules/mentor/MentorView";
 import { GlobalBenchmarkView } from "./modules/benchmark/GlobalBenchmarkView";
 import { DigitalTwinView } from "./modules/twin/DigitalTwinView";
 import { TimelineView } from "./modules/history/TimelineView";
+import { FloatingMentorWidget } from "./components/FloatingMentorWidget";
 import { PaywallModal } from "./components/PaywallModal";
 import { MyPlanView } from "./components/MyPlanView";
 import { ProContentGenerator } from "./components/ProContentGenerator";
@@ -1143,6 +1144,7 @@ export default function App() {
               {activeOsModule === "benchmark" && (
                 <GlobalBenchmarkView
                   digitalTwin={activeDigitalTwin}
+                  onNavigateToGrowth={() => setActiveOsModule("growth")}
                 />
               )}
               {activeOsModule === "twin" && (
@@ -1160,7 +1162,10 @@ export default function App() {
               {activeOsModule === "growth" && (
                 <GrowthCenterView 
                   diagnosisResult={diagnosisResult} 
-                  digitalTwin={activeDigitalTwin} 
+                  digitalTwin={activeDigitalTwin}
+                  userName={userName}
+                  handle={handle}
+                  niche={niche}
                 />
               )}
               {activeOsModule === "mentor" && (
@@ -1175,6 +1180,16 @@ export default function App() {
                   digitalTwin={activeDigitalTwin}
                   diagnosisResult={diagnosisResult}
                   currentScore={diagnosisResult.scoring.score || 0}
+                />
+              )}
+
+              {/* Universal Floating Mentor Widget (Only when not in full Mentor tab) */}
+              {activeOsModule !== "mentor" && (
+                <FloatingMentorWidget
+                  diagnosisResult={diagnosisResult}
+                  digitalTwin={activeDigitalTwin}
+                  userName={userName}
+                  onOpenFullMentor={() => setActiveOsModule("mentor")}
                 />
               )}
             </OSLayout>

@@ -1,18 +1,40 @@
-import React from "react";
+import React, { useState } from "react";
 import { motion } from "motion/react";
-import { Globe, Trophy, ArrowUpRight, ArrowDownRight, Users, Zap, TrendingUp, AlertTriangle, Layers } from "lucide-react";
+import { Globe, Trophy, ArrowUpRight, ArrowDownRight, Users, Zap, TrendingUp, AlertTriangle, Layers, CheckCircle2, ShieldCheck } from "lucide-react";
 import { DigitalTwin, createDefaultDigitalTwin } from "../../core/DigitalTwin";
 import { GlobalIntelligenceEngine } from "../../engine/analytics/GlobalIntelligenceEngine";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from "recharts";
 
 interface GlobalBenchmarkViewProps {
   digitalTwin?: DigitalTwin | null;
+  onNavigateToGrowth?: () => void;
 }
 
-export function GlobalBenchmarkView({ digitalTwin: rawTwin }: GlobalBenchmarkViewProps) {
+export function GlobalBenchmarkView({ digitalTwin: rawTwin, onNavigateToGrowth }: GlobalBenchmarkViewProps) {
   const digitalTwin = rawTwin || createDefaultDigitalTwin();
   const benchmark = GlobalIntelligenceEngine.getBenchmarkForNiche(digitalTwin.identity?.niche || "Geral");
   const comparison = GlobalIntelligenceEngine.compareTwinToGlobal(digitalTwin);
+
+  const [addedToPlan, setAddedToPlan] = useState(false);
+
+  const handleAddToPlan = () => {
+    setAddedToPlan(true);
+    try {
+      const existing = localStorage.getItem("instascore_custom_plan_actions") || "[]";
+      const actions = JSON.parse(existing);
+      actions.unshift({
+        id: `plan_action_${Date.now()}`,
+        title: `Adotar: ${comparison.recommendedPatternToAdopt}`,
+        instruction: `Eliminar padrão em declínio ("${comparison.patternToDrop}") e priorizar o padrão validado na coorte de ${benchmark.niche}.`,
+        effort: "medium",
+        source: "Global Benchmark V6",
+        addedAt: new Date().toISOString()
+      });
+      localStorage.setItem("instascore_custom_plan_actions", JSON.stringify(actions.slice(0, 10)));
+    } catch (e) {
+      console.warn("Could not save to localStorage:", e);
+    }
+  };
 
   const chartData = [
     {
@@ -36,7 +58,7 @@ export function GlobalBenchmarkView({ digitalTwin: rawTwin }: GlobalBenchmarkVie
           <p className="font-bold text-white mb-2">{label}</p>
           {payload.map((entry: any, index: number) => (
             <p key={index} style={{ color: entry.color }} className="text-sm font-medium">
-              {entry.name}: {entry.value}
+              {entry.name}: {entry.value} pts
             </p>
           ))}
         </div>
@@ -57,7 +79,14 @@ export function GlobalBenchmarkView({ digitalTwin: rawTwin }: GlobalBenchmarkVie
           <Globe size={14} /> Global Intelligence & Benchmarking
         </div>
         <h1 className="text-3xl font-extrabold text-white tracking-tight">Onde você está no mercado?</h1>
-        <p className="text-slate-400">Comparamos os dados do seu Digital Twin com a média dos perfis do nicho de <strong className="text-slate-200 uppercase">{benchmark.niche}</strong>.</p>
+        <p className="text-slate-400">
+          Comparamos os dados do seu Digital Twin com a coorte agregada de <strong className="text-slate-200 uppercase">{benchmark.niche}</strong>.
+        </p>
+        <div className="flex items-center gap-2 pt-1">
+          <span className="text-[11px] font-mono text-cyan-400/90 bg-cyan-950/50 px-2.5 py-1 rounded-md border border-cyan-800/40">
+            {benchmark.methodologySource} • {benchmark.sampleSizeLabel}
+          </span>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -101,7 +130,7 @@ export function GlobalBenchmarkView({ digitalTwin: rawTwin }: GlobalBenchmarkVie
                     <Zap size={14} />
                   </div>
                   <span className="text-sm font-medium text-slate-300">
-                    Velocidade de Execução ({digitalTwin.metrics?.executionScore || 50})
+                    Velocidade de Execução ({digitalTwin.metrics?.executionScore || 50}/100)
                   </span>
                 </div>
               </div>
@@ -111,7 +140,10 @@ export function GlobalBenchmarkView({ digitalTwin: rawTwin }: GlobalBenchmarkVie
 
         {/* Chart View */}
         <div className="md:col-span-2 bg-slate-900 border border-slate-800 rounded-3xl p-6 h-80">
-          <h3 className="font-bold text-white mb-6">Comparativo Direto</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-bold text-white">Comparativo Direto de Coorte</h3>
+            <span className="text-[10px] text-slate-400 font-mono">Normalizado 0-100</span>
+          </div>
           <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
@@ -135,7 +167,7 @@ export function GlobalBenchmarkView({ digitalTwin: rawTwin }: GlobalBenchmarkVie
         <div className="flex items-center justify-between">
           <h3 className="font-bold text-white flex items-center gap-2">
             <Layers size={20} className="text-cyan-400" />
-            Padrões Globais Detectados
+            Padrões Estruturais Identificados ({benchmark.niche})
           </h3>
           <span className="text-xs font-mono text-slate-500">Módulo 12: Algoritmo Global</span>
         </div>
@@ -174,15 +206,29 @@ export function GlobalBenchmarkView({ digitalTwin: rawTwin }: GlobalBenchmarkVie
         
         {/* Recommendation based on gaps */}
         <div className="mt-6 p-4 bg-cyan-500/10 border border-cyan-500/20 rounded-2xl flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
-           <div>
-             <span className="text-[10px] uppercase font-bold text-cyan-500 block mb-1">Ação Sugerida pela Inteligência Coletiva</span>
-             <p className="text-sm font-medium text-cyan-100">Implementar: "{comparison.recommendedPatternToAdopt}" e parar de utilizar "{comparison.patternToDrop}".</p>
+           <div className="space-y-1">
+             <span className="text-[10px] uppercase font-bold text-cyan-400 flex items-center gap-1.5">
+               <ShieldCheck size={12} /> Ação Recomendada pela Coorte
+             </span>
+             <p className="text-sm font-medium text-cyan-100">
+               Implementar: "{comparison.recommendedPatternToAdopt}" e parar de utilizar "{comparison.patternToDrop}".
+             </p>
            </div>
-           <button className="shrink-0 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold rounded-xl transition-colors">
-             Adicionar ao Plano (Módulo 6)
-           </button>
+           {addedToPlan ? (
+             <span className="shrink-0 px-4 py-2 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-xs font-bold rounded-xl flex items-center gap-1.5">
+               <CheckCircle2 size={14} /> Adicionado ao Plano Tático
+             </span>
+           ) : (
+             <button 
+               onClick={handleAddToPlan}
+               className="shrink-0 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer active:scale-95"
+             >
+               Adicionar ao Plano (Growth Center)
+             </button>
+           )}
         </div>
       </div>
     </motion.div>
   );
 }
+

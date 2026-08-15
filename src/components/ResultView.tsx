@@ -17,6 +17,7 @@ import { StrategicDashboard } from "./strategic/StrategicDashboard";
 import { ContentLab } from "./strategic/ContentLab";
 import { ProfileDNAService } from "../engine/strategic/ProfileDNAService";
 import { ProfileDNA } from "../types/strategic-brain";
+import { GlobalIntelligenceEngine } from "../engine/analytics/GlobalIntelligenceEngine";
 
 interface ResultViewProps {
   digitalTwin?: DigitalTwin | null;
@@ -50,9 +51,10 @@ export function ResultView({
   const [missionLoadingStage, setMissionLoadingStage] = useState("Iniciando IA estratégica...");
   const [activeBioModifier, setActiveBioModifier] = useState<BioModifier>("default");
   
-  // Fake benchmarks for premium feeling
-  const nicheAvg = Math.max(0, Math.round(currentScore * 0.65));
-  const top10 = Math.min(100, Math.round(currentScore * 1.3));
+  // Real niche cohort benchmarks from GlobalIntelligenceEngine
+  const nicheBenchmark = GlobalIntelligenceEngine.getBenchmarkForNiche(niche);
+  const nicheAvg = nicheBenchmark.averageScore;
+  const top10 = nicheBenchmark.topPercentileScore;
   
   // Wasted potential calculation
   const wastedPotential = 100 - currentScore;

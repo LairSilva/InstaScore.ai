@@ -10,7 +10,9 @@ import {
   LogOut,
   ChevronRight,
   TrendingUp,
-  BrainCircuit
+  BrainCircuit,
+  Menu,
+  X
 } from "lucide-react";
 import BrandSymbol, { BrandLogo } from "../components/BrandSymbol";
 
@@ -33,7 +35,8 @@ export function OSLayout({
   activeModule,
   onNavigate
 }: OSLayoutProps) {
-  
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
   const modules = [
     { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={18} /> },
     { id: "twin", label: "Digital Twin", icon: <Cpu size={18} /> },
@@ -44,11 +47,134 @@ export function OSLayout({
     { id: "history", label: "Timeline", icon: <History size={18} /> },
   ];
 
+  const handleSelectModule = (modId: string) => {
+    onNavigate(modId);
+    setIsMobileMenuOpen(false);
+  };
+
+  const cleanHandle = handle ? `@${handle.replace("@", "")}` : userName.split(" ")[0];
+
   return (
     <div className="min-h-screen bg-deep-space bg-tech-grid flex flex-col md:flex-row font-sans text-slate-100 selection:bg-[#E1306C] selection:text-white">
-      {/* Sidebar Navigation */}
-      <aside className="w-full md:w-64 glass-panel border-r border-white/10 flex flex-col justify-between shrink-0 h-auto md:h-screen sticky top-0 z-30 backdrop-blur-2xl">
-        <div className="p-4 sm:p-5 space-y-6">
+      
+      {/* Mobile Top Header */}
+      <header className="md:hidden sticky top-0 z-40 bg-[#04050A]/90 backdrop-blur-xl border-b border-white/10 px-4 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setIsMobileMenuOpen(true)}
+            className="p-2 text-slate-300 hover:text-white rounded-xl bg-white/5 border border-white/10 active:scale-95 transition-all min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer"
+            aria-label="Abrir Menu do OS"
+          >
+            <Menu size={20} />
+          </button>
+          <BrandLogo iconSize={30} textSize="sm" />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-white/5 border border-white/10">
+            <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-[#FF5E36] via-[#E1306C] to-[#833AB4] flex items-center justify-center font-black text-[11px] text-white font-mono">
+              {score}
+            </div>
+            <span className="text-xs font-bold text-slate-200 truncate max-w-[100px]">
+              {cleanHandle}
+            </span>
+          </div>
+        </div>
+      </header>
+
+      {/* Mobile Navigation Drawer Backdrop & Modal */}
+      <AnimatePresence>
+        {isMobileMenuOpen && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsMobileMenuOpen(false)}
+              className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 md:hidden"
+            />
+            <motion.div
+              initial={{ x: "-100%" }}
+              animate={{ x: 0 }}
+              exit={{ x: "-100%" }}
+              transition={{ type: "spring", stiffness: 300, damping: 30 }}
+              className="fixed inset-y-0 left-0 w-4/5 max-w-xs bg-[#080B14] border-r border-white/15 z-50 flex flex-col justify-between p-5 md:hidden shadow-2xl"
+            >
+              <div className="space-y-6 overflow-y-auto">
+                <div className="flex items-center justify-between pb-4 border-b border-white/10">
+                  <BrandLogo iconSize={32} textSize="md" showTagline />
+                  <button
+                    type="button"
+                    onClick={() => setIsMobileMenuOpen(false)}
+                    className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-white/10 transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+
+                {/* Mobile User Card */}
+                <div className="flex items-center gap-3 p-3 rounded-2xl glass-panel border border-white/10 shadow-lg">
+                  <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-[#FF5E36] via-[#E1306C] to-[#833AB4] flex items-center justify-center font-black text-white shadow-[0_0_15px_rgba(225,48,108,0.35)] text-sm shrink-0 font-mono">
+                    {score}
+                  </div>
+                  <div className="overflow-hidden">
+                    <h2 className="font-bold text-xs text-white truncate max-w-[150px] font-display">
+                      {cleanHandle}
+                    </h2>
+                    <span className="text-[10px] text-[#FA26A0] font-mono font-semibold">InstaScore OS v6</span>
+                  </div>
+                </div>
+
+                {/* Mobile Modules Navigation */}
+                <nav className="space-y-1">
+                  <h3 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-3 px-3 font-mono">
+                    SISTEMA OPERACIONAL
+                  </h3>
+                  {modules.map((mod) => {
+                    const isActive = activeModule === mod.id;
+                    return (
+                      <button
+                        key={mod.id}
+                        onClick={() => handleSelectModule(mod.id)}
+                        className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all cursor-pointer min-h-[44px] ${
+                          isActive 
+                            ? "bg-gradient-to-r from-[#FF5E36]/20 via-[#E1306C]/20 to-[#833AB4]/20 text-white border border-[#E1306C]/40 shadow-[0_0_20px_rgba(225,48,108,0.2)] font-bold" 
+                            : "text-slate-400 hover:text-white hover:bg-white/5 border border-transparent"
+                        }`}
+                      >
+                        <span className={isActive ? "text-[#FF5E36]" : "text-slate-500"}>
+                          {mod.icon}
+                        </span>
+                        {mod.label}
+                        {isActive && <ChevronRight size={14} className="ml-auto text-[#E1306C]" />}
+                      </button>
+                    );
+                  })}
+                </nav>
+              </div>
+
+              {/* Mobile Footer Exit */}
+              <div className="pt-4 border-t border-white/10">
+                <button 
+                  onClick={() => {
+                    setIsMobileMenuOpen(false);
+                    onLogout();
+                  }}
+                  className="w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer min-h-[44px]"
+                >
+                  <LogOut size={16} />
+                  Sair do OS
+                </button>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* Desktop Sidebar Navigation */}
+      <aside className="hidden md:flex w-64 glass-panel border-r border-white/10 flex-col justify-between shrink-0 h-screen sticky top-0 z-30 backdrop-blur-2xl">
+        <div className="p-4 sm:p-5 space-y-6 overflow-y-auto">
           
           {/* Brand Logo Header */}
           <div className="pb-4 border-b border-white/10">
@@ -62,13 +188,13 @@ export function OSLayout({
             </div>
             <div className="overflow-hidden">
               <h2 className="font-bold text-xs text-white truncate max-w-[130px] font-display">
-                {handle ? `@${handle.replace("@", "")}` : userName.split(" ")[0]}
+                {cleanHandle}
               </h2>
               <span className="text-[10px] text-[#FA26A0] font-mono font-semibold">InstaScore OS v6</span>
             </div>
           </div>
 
-          {/* Navigation */}
+          {/* Desktop Navigation */}
           <nav className="space-y-1">
             <h3 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-3 px-3 font-mono">
               SISTEMA OPERACIONAL
@@ -91,7 +217,7 @@ export function OSLayout({
                   {mod.label}
                   {isActive && <ChevronRight size={14} className="ml-auto text-[#E1306C]" />}
                 </button>
-              )
+              );
             })}
           </nav>
         </div>
@@ -100,7 +226,7 @@ export function OSLayout({
         <div className="p-4 sm:p-5 border-t border-white/10">
           <button 
             onClick={onLogout}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer min-h-[44px]"
           >
             <LogOut size={16} />
             Sair do OS
@@ -109,7 +235,7 @@ export function OSLayout({
       </aside>
 
       {/* Main Content Area */}
-      <main className="flex-1 h-screen overflow-y-auto relative scroll-smooth">
+      <main className="flex-1 md:h-screen md:overflow-y-auto relative scroll-smooth pb-20 md:pb-8">
         <div className="p-4 sm:p-8 lg:p-10 max-w-6xl mx-auto">
           <AnimatePresence mode="wait">
             <motion.div
@@ -124,7 +250,63 @@ export function OSLayout({
           </AnimatePresence>
         </div>
       </main>
+
+      {/* Mobile Bottom Quick Switcher Bar */}
+      <div className="md:hidden fixed bottom-0 inset-x-0 bg-[#04050A]/95 border-t border-white/10 px-2 py-1.5 flex items-center justify-around z-30 backdrop-blur-xl">
+        <button
+          type="button"
+          onClick={() => onNavigate("dashboard")}
+          className={`flex flex-col items-center gap-1 p-2 rounded-xl text-[10px] font-semibold transition-all min-h-[44px] ${
+            activeModule === "dashboard" ? "text-[#FA26A0] font-bold" : "text-slate-400"
+          }`}
+        >
+          <LayoutDashboard size={18} />
+          <span>Dashboard</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigate("twin")}
+          className={`flex flex-col items-center gap-1 p-2 rounded-xl text-[10px] font-semibold transition-all min-h-[44px] ${
+            activeModule === "twin" ? "text-[#FA26A0] font-bold" : "text-slate-400"
+          }`}
+        >
+          <Cpu size={18} />
+          <span>Digital Twin</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigate("growth")}
+          className={`flex flex-col items-center gap-1 p-2 rounded-xl text-[10px] font-semibold transition-all min-h-[44px] ${
+            activeModule === "growth" ? "text-[#FA26A0] font-bold" : "text-slate-400"
+          }`}
+        >
+          <Rocket size={18} />
+          <span>Growth</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigate("simulator")}
+          className={`flex flex-col items-center gap-1 p-2 rounded-xl text-[10px] font-semibold transition-all min-h-[44px] ${
+            activeModule === "simulator" ? "text-[#FA26A0] font-bold" : "text-slate-400"
+          }`}
+        >
+          <Sparkles size={18} />
+          <span>Simulador</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setIsMobileMenuOpen(true)}
+          className="flex flex-col items-center gap-1 p-2 rounded-xl text-[10px] font-semibold text-slate-400 hover:text-white transition-all min-h-[44px]"
+        >
+          <Menu size={18} />
+          <span>Mais</span>
+        </button>
+      </div>
+
     </div>
   );
 }
-
