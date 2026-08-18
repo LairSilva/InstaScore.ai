@@ -37,7 +37,13 @@ export function FloatingMentorWidget({
   useEffect(() => {
     if (isOpen) {
       scrollToBottom();
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
     }
+    return () => {
+      document.body.style.overflow = "";
+    };
   }, [messages, isOpen]);
 
   const handleSend = async (customText?: string) => {
@@ -89,20 +95,25 @@ export function FloatingMentorWidget({
         <motion.div
           initial={{ scale: 0, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
-          className="fixed bottom-5 right-5 z-40"
+          className="fixed z-40 pointer-events-auto"
+          style={{
+            bottom: 'calc(20px + env(safe-area-inset-bottom))',
+            right: 'calc(20px + env(safe-area-inset-right))'
+          }}
         >
           <button
             type="button"
             id="btn_floating_mentor_open"
             onClick={() => setIsOpen(true)}
-            className="flex items-center gap-2.5 px-4 py-3 bg-gradient-to-r from-[#FF5E36] via-[#E1306C] to-[#833AB4] hover:brightness-110 text-white rounded-full shadow-2xl shadow-[#E1306C]/40 border border-white/20 font-bold text-xs cursor-pointer transition-all active:scale-95 group min-h-[44px]"
+            aria-label="Abrir Mentor IA"
+            aria-expanded={isOpen}
+            className="flex items-center justify-center p-3 sm:px-4 sm:py-3 bg-gradient-to-r from-[#FF5E36] via-[#E1306C] to-[#833AB4] hover:brightness-110 text-white rounded-full shadow-2xl shadow-[#E1306C]/40 border border-white/20 font-bold text-xs cursor-pointer transition-all active:scale-95 group min-h-[48px] min-w-[48px]"
           >
-            <div className="w-6 h-6 rounded-full bg-white/20 flex items-center justify-center">
-              <BrainCircuit size={14} className="animate-pulse text-white" />
+            <div className="w-6 h-6 rounded-full bg-white/20 flex items-center justify-center shrink-0 relative">
+              <BrainCircuit size={14} className="text-white" />
+              <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-[#E1306C] animate-pulse"></span>
             </div>
-            <span className="hidden sm:inline-block font-display">Mentor IA</span>
-            <span className="inline-block sm:hidden text-[11px]">Mentor</span>
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+            <span className="hidden sm:inline-block font-display ml-2.5">Mentor IA</span>
           </button>
         </motion.div>
       )}
@@ -117,7 +128,7 @@ export function FloatingMentorWidget({
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsOpen(false)}
-              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 md:hidden"
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 md:hidden touch-none"
             />
 
             {/* Panel Container (Bottom Sheet on Mobile, Floating Dock on Desktop) */}

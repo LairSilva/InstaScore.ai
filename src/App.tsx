@@ -557,7 +557,7 @@ export default function App() {
   };
 
   return (
-    <div id="instascore-app-wrapper" className="min-h-screen bg-deep-space bg-tech-grid text-slate-100 flex flex-col justify-between selection:bg-[#E1306C] selection:text-white relative overflow-hidden">
+    <div id="instascore-app-wrapper" className="min-h-screen bg-deep-space bg-tech-grid text-slate-100 flex flex-col justify-between selection:bg-[#E1306C] selection:text-white relative overflow-x-hidden">
       
       {/* Background Ambient Auroras & Lights */}
       <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
@@ -1120,7 +1120,7 @@ export default function App() {
 
         {/* VIEW 4: OS VIEW */}
         {view === "result" && diagnosisResult && (
-          <div className="fixed inset-0 z-50 bg-slate-950">
+          <div className="fixed inset-0 z-50 bg-slate-950 overflow-y-auto overflow-x-hidden md:overflow-hidden">
             <OSLayout
               userName={userName}
               handle={handle}

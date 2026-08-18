@@ -37,6 +37,17 @@ export function OSLayout({
 }: OSLayoutProps) {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
+  React.useEffect(() => {
+    if (isMobileMenuOpen) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [isMobileMenuOpen]);
+
   const modules = [
     { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={18} /> },
     { id: "twin", label: "Digital Twin", icon: <Cpu size={18} /> },
@@ -92,7 +103,7 @@ export function OSLayout({
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsMobileMenuOpen(false)}
-              className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 md:hidden"
+              className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 md:hidden touch-none"
             />
             <motion.div
               initial={{ x: "-100%" }}
@@ -235,7 +246,7 @@ export function OSLayout({
       </aside>
 
       {/* Main Content Area */}
-      <main className="flex-1 md:h-screen md:overflow-y-auto relative scroll-smooth pb-20 md:pb-8">
+      <main className="flex-1 md:h-screen overflow-x-hidden relative scroll-smooth pb-8">
         <div className="p-4 sm:p-8 lg:p-10 max-w-6xl mx-auto">
           <AnimatePresence mode="wait">
             <motion.div
@@ -250,62 +261,6 @@ export function OSLayout({
           </AnimatePresence>
         </div>
       </main>
-
-      {/* Mobile Bottom Quick Switcher Bar */}
-      <div className="md:hidden fixed bottom-0 inset-x-0 bg-[#04050A]/95 border-t border-white/10 px-2 py-1.5 flex items-center justify-around z-30 backdrop-blur-xl">
-        <button
-          type="button"
-          onClick={() => onNavigate("dashboard")}
-          className={`flex flex-col items-center gap-1 p-2 rounded-xl text-[10px] font-semibold transition-all min-h-[44px] ${
-            activeModule === "dashboard" ? "text-[#FA26A0] font-bold" : "text-slate-400"
-          }`}
-        >
-          <LayoutDashboard size={18} />
-          <span>Dashboard</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onNavigate("twin")}
-          className={`flex flex-col items-center gap-1 p-2 rounded-xl text-[10px] font-semibold transition-all min-h-[44px] ${
-            activeModule === "twin" ? "text-[#FA26A0] font-bold" : "text-slate-400"
-          }`}
-        >
-          <Cpu size={18} />
-          <span>Digital Twin</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onNavigate("growth")}
-          className={`flex flex-col items-center gap-1 p-2 rounded-xl text-[10px] font-semibold transition-all min-h-[44px] ${
-            activeModule === "growth" ? "text-[#FA26A0] font-bold" : "text-slate-400"
-          }`}
-        >
-          <Rocket size={18} />
-          <span>Growth</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onNavigate("simulator")}
-          className={`flex flex-col items-center gap-1 p-2 rounded-xl text-[10px] font-semibold transition-all min-h-[44px] ${
-            activeModule === "simulator" ? "text-[#FA26A0] font-bold" : "text-slate-400"
-          }`}
-        >
-          <Sparkles size={18} />
-          <span>Simulador</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setIsMobileMenuOpen(true)}
-          className="flex flex-col items-center gap-1 p-2 rounded-xl text-[10px] font-semibold text-slate-400 hover:text-white transition-all min-h-[44px]"
-        >
-          <Menu size={18} />
-          <span>Mais</span>
-        </button>
-      </div>
 
     </div>
   );
