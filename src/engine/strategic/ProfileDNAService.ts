@@ -1,5 +1,6 @@
 import { ProfileDNA, ContentPillar } from '../../types/strategic-brain';
 import { db, auth, ensureAuthUser, handleFirestoreError, OperationType, sanitizeId } from '../../lib/firebase';
+import { calculateRetentionUntil, RETENTION_POLICIES } from '../../lib/data-retention-client';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 const LOCAL_STORAGE_PREFIX = 'instascore_profile_dna_';
@@ -59,12 +60,13 @@ export class ProfileDNAService {
     // Get existing to merge
     const existing = (await this.getProfileDNA(dna.username, uid)) || this.createDefaultDNA(dna.username, uid);
 
-    const updatedDNA: ProfileDNA = {
+    const updatedDNA: ProfileDNA & { retentionUntil?: number } = {
       ...existing,
       ...dna,
       id: docId,
       userId: uid,
       username: dna.username,
+      retentionUntil: calculateRetentionUntil(RETENTION_POLICIES.PROFILE_DNA_DAYS),
       last_updated: new Date().toISOString()
     };
 

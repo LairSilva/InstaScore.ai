@@ -43,7 +43,7 @@ export default function ShareModal({
 
   if (!isOpen) return null;
 
-  const shareText = `Acabei de auditar a estrutura estratégica do meu Instagram no InstaScore.ai e obtive nota ${score}/100! 🚀 Com o plano de ações prioritárias, meu Score-alvo simulado vai para ${targetScore}/100. Faça o teste gratuito do seu perfil também no InstaScore.ai!`;
+  const shareText = `Acabei de auditar a conformidade estratégica do meu Instagram no InstaScore.ai e obtive nota ${score}/100 na matriz C.A.G.E.! 🎯 A simulação matemática projeta um Score Alvo de até ${targetScore}/100 com os ajustes estruturais. Conheça a metodologia no InstaScore.ai!`;
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(shareText).then(() => {

@@ -243,36 +243,36 @@ export const DEMO_DIAGNOSIS: DiagnosisInput = {
       title: "Adicionar CTA Clara na Bio",
       instruction: "Insira uma última linha chamativa na bio, logo acima do link, por exemplo: '👇 Agende sua Sessão de Transição Experimental clicando abaixo:'",
       effort: "low",
-      expected_effect: "Aumento imediato de 30% a 50% na taxa de cliques rumo ao seu contato comercial."
+      expected_effect: "Reduz o atrito de decisão do visitante, direcionando a atenção diretamente para a ação de contato prioritária."
     },
     {
       criterion_id: "conversion.highlights_journey",
       title: "Estruturar Destaques em Funil",
       instruction: "Crie e ordene 3 destaques principais: 1. 'COMECE AQUI' (sua história e metodologia), 2. 'RESULTADOS' (depoimentos de clientes), 3. 'MENTORIA' (como contratar, benefícios, CTA).",
       effort: "medium",
-      expected_effect: "Doutrina novos visitantes de forma automática, acelerando o fechamento de novas mentorias."
+      expected_effect: "Apresenta a jornada metodológica e depoimentos de forma estruturada para novos visitantes."
     },
     {
       criterion_id: "authority.social_proof",
       title: "Publicar Post de Estudo de Caso",
       instruction: "Escreva um post em carrossel contando a história de transição de um mentorado seu (anonimizando se necessário), mostrando o antes, a estratégia aplicada e o cargo atual dele.",
       effort: "medium",
-      expected_effect: "Valida sua competência prática de maneira elegante e reduz a objeção de compra de novos clientes."
+      expected_effect: "Demonstra aplicação prática da sua metodologia e esclarece o processo para potenciais clientes."
     },
     {
       criterion_id: "seo.link_clarity",
       title: "Simplificar o Link da Bio",
       instruction: "Substitua o Linktree poluído por um link direto para o seu WhatsApp comercial ou uma página de captura focada única e exclusivamente na aplicação da mentoria.",
       effort: "low",
-      expected_effect: "Elimina a dispersão do usuário no funil de vendas, direcionando o tráfego qualificado para a conversão imediata."
+      expected_effect: "Reduz opções conflitantes, facilitando o direcionamento para o canal prioritário."
     }
   ],
   tomorrow_action: {
     "criterion_id": "seo.name_keyword",
     "title": "Configurar SEO no Campo de Nome",
-    "instruction": "Abra as configurações do seu perfil e altere o campo 'Nome' de 'Ana Silva' para 'Ana Silva | Mentora de Carreira'. Essa mudança simples leva 30 segundos e começa a funcionar instantaneamente nas pesquisas globais do Instagram."
+    "instruction": "Abra as configurações do seu perfil e altere o campo 'Nome' de 'Ana Silva' para 'Ana Silva | Mentora de Carreira'. Essa mudança aumenta a relevância estrutural do perfil nas buscas por termos do nicho."
   },
-  disclaimer: "Este diagnóstico mede a preparação estratégica e estrutural do perfil. Não representa garantia de crescimento, alcance ou vendas."
+  disclaimer: "Este diagnóstico mede a preparação e conformidade estrutural do perfil com a metodologia C.A.G.E. Trata-se de uma simulação analítica e não representa garantia de crescimento, alcance ou vendas."
 };
 
 export const DEMO_SCORING: ScoringResult = {

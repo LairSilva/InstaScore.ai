@@ -50,6 +50,7 @@ assert(scoring.targetScore !== null && scoring.targetScore > scoring.score, "Tar
 // ==========================================
 console.log("\n--- TESTE B: Validação do DiagnosisSchema & Robustez ---");
 const validPayload = {
+  methodology_version: "instascore-structural-0.1-alpha",
   metadata: {
     is_data_sufficient: true,
     missing_elements: [],
@@ -96,7 +97,7 @@ assert(!hasEntitlement("FREE", "contentAi"), "Plano FREE bloqueia Content AI (Pa
 assert(hasEntitlement("PRO", "contentAi"), "Plano PRO libera Content AI");
 assert(hasEntitlement("PRO", "reelsGenerator"), "Plano PRO libera Gerador de Reels");
 
-const freeEntitlement = checkUserEntitlement("test_user_free", "contentAi");
+const freeEntitlement = await checkUserEntitlement("test_user_free", "contentAi");
 assert(!freeEntitlement.allowed, "checkUserEntitlement bloqueia usuário free em contentAi");
 
 // ==========================================
@@ -131,7 +132,7 @@ assert(startResult.startScore > 0, "Calcula o Start Score inicial ponderado");
 // TEST F: AI MODEL ROUTER CONFIGURATION
 // ==========================================
 console.log("\n--- TESTE F: AI Model Router & Resilience ---");
-assert(AI_MODEL_ROUTER.primaryModel === "gemini-3.7-flash", "AI Model Router configurado com gemini-3.7-flash");
+assert(AI_MODEL_ROUTER.primaryModel === "gemini-3.1-pro-preview", "AI Model Router configurado com gemini-3.1-pro-preview");
 assert(AI_MODEL_ROUTER.requestTimeoutMs > 0, "Timeout de segurança configurado no Router");
 assert(AI_MODEL_ROUTER.fallbackModels.length > 0, "Modelos de fallback configurados no Router");
 

@@ -2,13 +2,13 @@
  * Centralized AI Model Router Configuration for InstaScore OS
  */
 export const AI_MODEL_ROUTER = {
-  primaryModel: "gemini-3.7-flash",
+  primaryModel: "gemini-3.1-pro-preview",
   fallbackModels: [
-    "gemini-2.5-pro",
+    "gemini-3.1-flash",
     "gemini-3.1-flash-lite"
   ],
-  economicModel: "gemini-3.7-flash",
-  advancedModel: "gemini-2.5-pro",
+  economicModel: "gemini-3.1-flash",
+  advancedModel: "gemini-3.1-pro-preview",
   maxAttemptsPerModel: 1, // Strict cost control: 1 primary call (+ 1 correctional retry if needed)
   retryDelayBaseMs: 1500,
   requestTimeoutMs: 120000,

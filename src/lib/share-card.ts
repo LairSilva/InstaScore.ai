@@ -249,18 +249,22 @@ export function generateShareCard(
       ctx.textAlign = "center";
       ctx.fillStyle = "#FF5E36";
       ctx.font = "bold 16px sans-serif";
-      ctx.fillText("POTENCIAL COM IA", badgeX + badgeW / 2, badgeY + 28);
+      ctx.fillText("SIMULAÇÃO C.A.G.E.", badgeX + badgeW / 2, badgeY + 28);
 
       ctx.fillStyle = "#FFFFFF";
       ctx.font = "bold 28px sans-serif";
-      ctx.fillText(`Até ${targetScore}/100`, badgeX + badgeW / 2, badgeY + 55);
+      ctx.fillText(`Alvo: ${targetScore}/100`, badgeX + badgeW / 2, badgeY + 55);
     }
 
     // --- 6. Footer ---
     ctx.textAlign = "center";
     ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
-    ctx.font = "bold 22px sans-serif";
-    ctx.fillText("Faça o diagnóstico gratuito do seu perfil no InstaScore.ai", cx, 1010);
+    ctx.font = "bold 20px sans-serif";
+    ctx.fillText("Diagnóstico estrutural C.A.G.E. • InstaScore.ai", cx, 995);
+
+    ctx.fillStyle = "rgba(226, 232, 240, 0.45)";
+    ctx.font = "14px sans-serif";
+    ctx.fillText("Simulação matemática de conformidade metodológica. Sem garantia de alcance ou vendas.", cx, 1025);
 
     // Return data URL
     resolve(canvas.toDataURL("image/png"));

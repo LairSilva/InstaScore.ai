@@ -12,7 +12,8 @@ import {
   TrendingUp,
   BrainCircuit,
   Menu,
-  X
+  X,
+  ShieldCheck
 } from "lucide-react";
 import BrandSymbol, { BrandLogo } from "../components/BrandSymbol";
 
@@ -24,6 +25,7 @@ interface OSLayoutProps {
   onLogout: () => void;
   activeModule: string;
   onNavigate: (module: string) => void;
+  onOpenPrivacy?: () => void;
 }
 
 export function OSLayout({
@@ -33,7 +35,8 @@ export function OSLayout({
   score,
   onLogout,
   activeModule,
-  onNavigate
+  onNavigate,
+  onOpenPrivacy
 }: OSLayoutProps) {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -166,7 +169,20 @@ export function OSLayout({
               </div>
 
               {/* Mobile Footer Exit */}
-              <div className="pt-4 border-t border-white/10">
+              <div className="pt-4 border-t border-white/10 space-y-1">
+                {onOpenPrivacy && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMobileMenuOpen(false);
+                      onOpenPrivacy();
+                    }}
+                    className="w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold text-slate-300 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors cursor-pointer min-h-[44px]"
+                  >
+                    <ShieldCheck size={16} className="text-indigo-400" />
+                    Privacidade & Dados
+                  </button>
+                )}
                 <button 
                   onClick={() => {
                     setIsMobileMenuOpen(false);
@@ -234,7 +250,17 @@ export function OSLayout({
         </div>
 
         {/* Footer Actions */}
-        <div className="p-4 sm:p-5 border-t border-white/10">
+        <div className="p-4 sm:p-5 border-t border-white/10 space-y-1">
+          {onOpenPrivacy && (
+            <button 
+              type="button"
+              onClick={onOpenPrivacy}
+              className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-300 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors cursor-pointer min-h-[44px]"
+            >
+              <ShieldCheck size={16} className="text-indigo-400" />
+              Privacidade & Dados
+            </button>
+          )}
           <button 
             onClick={onLogout}
             className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer min-h-[44px]"

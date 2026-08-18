@@ -1,45 +1,44 @@
 import { GrowthScores } from "./DigitalTwin";
 
 // Módulo 8: Growth Engine
-// Responsável por calcular e evoluir os novos indicadores da plataforma.
-// A lógica matemática do crescimento contínuo.
+// Responsável por derivar indicadores analíticos determinísticos a partir do score base C.A.G.E.
+// Todos os indicadores são simulações analíticas limitadas ao intervalo [0, 100].
 
 export class GrowthEngine {
   /**
-   * Bootstraps the initial GrowthScores based on an initial diagnostic score.
-   * Na fase de transição, usamos o score base para derivar os novos indicadores.
+   * Deriva os scores táticos iniciais baseados no score C.A.G.E. do diagnóstico.
+   * Todos os scores gerados são baselines analíticos limitados estritamente entre 0 e 100.
    */
   static bootstrapScores(baseScore: number): GrowthScores {
+    const clamp = (val: number, min = 0, max = 100) => Math.min(max, Math.max(min, Math.round(val)));
+    const cleanBase = clamp(baseScore);
+
     return {
-      overallScore: baseScore,
+      overallScore: cleanBase,
       
-      // Penaliza levemente execução e consistência no início, pois a IA ainda não mediu o longo prazo.
-      executionScore: Math.max(10, Math.round(baseScore * 0.85)),
-      consistencyScore: Math.max(10, Math.round(baseScore * 0.70)),
+      // Indicadores táticos derivados determinísticos
+      executionScore: clamp(cleanBase * 0.85, 10, 100),
+      consistencyScore: clamp(cleanBase * 0.70, 10, 100),
+      momentumScore: clamp(cleanBase * 1.1, 0, 100),
       
-      // Momentum recebe um bônus se o base score for alto, indicando tração natural.
-      momentumScore: Math.min(100, Math.round(baseScore * 1.1)),
-      
-      // Inicializa alto para incentivar a curva de aprendizado
+      // Baseline heurístico de aprendizado
       learningScore: 100, 
       
-      // Velocidades variam dependendo da força inicial
-      authorityVelocity: Math.max(10, Math.round(baseScore * 0.8)),
-      growthVelocity: Math.min(100, Math.round(baseScore * 1.05)),
-      
-      // Conversão é sempre o maior gargalo inicial do mercado
-      conversionVelocity: Math.max(5, Math.round(baseScore * 0.6)), 
+      // Velocidades estruturais derivadas
+      authorityVelocity: clamp(cleanBase * 0.8, 10, 100),
+      growthVelocity: clamp(cleanBase * 1.05, 0, 100),
+      conversionVelocity: clamp(cleanBase * 0.6, 5, 100), 
     };
   }
 
   /**
-   * Futuro Módulo 3 & 6: Atualiza os scores com base em uma nova ação executada.
+   * Atualiza os scores com base em uma nova ação executada (limitado a 100).
    */
   static processActionImpact(currentScores: GrowthScores, actionMultiplier: number): GrowthScores {
-    // Apenas estrutura inicial para a arquitetura (Stub)
+    const clamp = (val: number) => Math.min(100, Math.max(0, Math.round(val)));
     return {
       ...currentScores,
-      executionScore: Math.min(100, currentScores.executionScore + (2 * actionMultiplier))
+      executionScore: clamp(currentScores.executionScore + (2 * actionMultiplier))
     };
   }
 }

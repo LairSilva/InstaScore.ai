@@ -56,7 +56,9 @@ import { PaywallModal } from "./components/PaywallModal";
 import { MyPlanView } from "./components/MyPlanView";
 import { ProContentGenerator } from "./components/ProContentGenerator";
 import { useEntitlements } from "./hooks/useEntitlements";
-import { Crown, CreditCard } from "lucide-react";
+import PrivacyDataModal from "./components/PrivacyDataModal";
+import { extractMinimalDiagnosisSummary } from "./lib/data-retention-client";
+import { Crown, CreditCard, ShieldCheck } from "lucide-react";
 
 export default function App() {
   // Navigation View State
@@ -118,6 +120,7 @@ export default function App() {
 
   // Modal Share Controller
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [isPrivacyModalOpen, setIsPrivacyModalOpen] = useState(false);
 
   // Interactive UI details (e.g. which category is currently expanded to inspect criteria)
   const [expandedCategory, setExpandedCategory] = useState<string | null>("positioning");
@@ -389,6 +392,12 @@ export default function App() {
       // Store results and set success state. Navigation happens after 100% completion delay
       setDiagnosisResult(data);
       saveDiagnosisToFirestore(data).catch(err => console.warn('[Firebase] Save diagnosis warning:', err));
+      
+      // Minimization & zero-persistence: purge base64 screenshots from memory immediately
+      setPrint1(undefined);
+      setPrint2(undefined);
+      setPrint3(undefined);
+      
       setAnalysisStatus("success");
     } catch (err: any) {
       clearTimeout(timeoutId);
@@ -465,10 +474,12 @@ export default function App() {
     testFirebaseConnection().catch(err => console.warn('[Firebase] Connection test warning:', err));
 
     try {
+      const savedSummary = localStorage.getItem("instascore_diagnosis_summary");
       const savedDiag = localStorage.getItem("instascore_last_diagnosis");
       const savedStart = localStorage.getItem("instascore_last_start_result");
       const savedUser = localStorage.getItem("instascore_last_user_name");
       const savedHandle = localStorage.getItem("instascore_last_handle");
+
       if (savedDiag) {
         const parsed = JSON.parse(savedDiag);
         if (parsed?.diagnosis && parsed?.scoring) {
@@ -477,6 +488,11 @@ export default function App() {
           if (savedHandle) setHandle(savedHandle);
           setView("result");
         }
+      } else if (savedSummary) {
+        // Restore minimal summary state for user reference
+        const parsed = JSON.parse(savedSummary);
+        if (savedUser) setUserName(savedUser);
+        if (savedHandle) setHandle(savedHandle);
       } else if (savedStart) {
         const parsed = JSON.parse(savedStart);
         if (parsed?.startScore) {
@@ -489,11 +505,19 @@ export default function App() {
     }
   }, []);
 
-  // Save diagnosis to localStorage when updated
+  // Save diagnosis to localStorage when updated with data minimization
   useEffect(() => {
     if (diagnosisResult && !isDemoMode) {
       try {
-        localStorage.setItem("instascore_last_diagnosis", JSON.stringify(diagnosisResult));
+        const isOptInFull = localStorage.getItem("instascore_opt_in_full_storage") === "true";
+        if (isOptInFull) {
+          localStorage.setItem("instascore_last_diagnosis", JSON.stringify(diagnosisResult));
+        } else {
+          // Minimization Policy: store only minimal summary in localStorage
+          const minimalSummary = extractMinimalDiagnosisSummary(diagnosisResult);
+          localStorage.setItem("instascore_diagnosis_summary", JSON.stringify(minimalSummary));
+          localStorage.removeItem("instascore_last_diagnosis");
+        }
         if (userName) localStorage.setItem("instascore_last_user_name", userName);
         if (handle) localStorage.setItem("instascore_last_handle", handle);
       } catch (e) {
@@ -521,6 +545,7 @@ export default function App() {
   // Reset diagnosis
   const handleReset = () => {
     try {
+      localStorage.removeItem("instascore_diagnosis_summary");
       localStorage.removeItem("instascore_last_diagnosis");
       localStorage.removeItem("instascore_last_start_result");
       localStorage.removeItem("instascore_last_user_name");
@@ -918,7 +943,17 @@ export default function App() {
                   <div className="space-y-2">
                     <h2 className="text-xl font-bold text-white">Privacidade e Termos</h2>
                     <p className="text-xs sm:text-sm text-slate-300 leading-relaxed max-w-md mx-auto">
-                      Para realizar o diagnóstico, nosso algoritmo e a API segura do Gemini processarão suas informações estratégicas e imagens temporariamente.
+                      Para realizar o diagnóstico estrutural, seus dados e capturas de tela são processados em memória volátil.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 rounded-2xl bg-emerald-950/20 border border-emerald-500/20 text-left max-w-md mx-auto space-y-1">
+                    <div className="flex items-center gap-1.5 text-emerald-400 font-bold text-xs">
+                      <ShieldCheck size={14} />
+                      <span>Zero-Persistência de Imagens</span>
+                    </div>
+                    <p className="text-[11px] text-slate-300 leading-relaxed">
+                      Suas capturas de tela são utilizadas unicamente durante os segundos de análise por IA e <strong>descartadas imediatamente após o processamento</strong>. Elas nunca são gravadas no servidor ou associadas permanentemente ao seu usuário.
                     </p>
                   </div>
 
@@ -1128,6 +1163,7 @@ export default function App() {
               onLogout={handleReset}
               activeModule={activeOsModule}
               onNavigate={setActiveOsModule}
+              onOpenPrivacy={() => setIsPrivacyModalOpen(true)}
             >
               {activeOsModule === "dashboard" && (
                 <ResultView 
@@ -1222,14 +1258,30 @@ export default function App() {
         }}
       />
 
+      {/* Privacy, Minimization & Data Retention Modal */}
+      <PrivacyDataModal
+        isOpen={isPrivacyModalOpen}
+        onClose={() => setIsPrivacyModalOpen(false)}
+        userId={userId}
+        onDataDeleted={handleReset}
+      />
+
       {/* 3. Footer (Universal) */}
       <footer id="app-global-footer" className="border-t border-slate-900/60 py-6 bg-slate-950 text-center select-none">
         <div className="max-w-6xl mx-auto px-4 space-y-2">
-          <p className="text-xs text-slate-500">
-            &copy; 2026 InstaScore.ai. Todos os direitos reservados.
-          </p>
+          <div className="flex items-center justify-center gap-4 text-xs">
+            <span className="text-slate-500">&copy; 2026 InstaScore.ai. Todos os direitos reservados.</span>
+            <button
+              type="button"
+              onClick={() => setIsPrivacyModalOpen(true)}
+              className="text-indigo-400 hover:text-indigo-300 transition-colors font-medium flex items-center gap-1 cursor-pointer"
+            >
+              <ShieldCheck size={14} />
+              Privacidade & Retenção de Dados
+            </button>
+          </div>
           <p className="text-[10px] text-slate-600 leading-relaxed max-w-xl mx-auto">
-            O InstaScore.ai é um auditor estrutural independente e não possui vínculo, patrocínio ou afiliação oficial com o Instagram, Meta Inc. ou suas subsidiárias.
+            O InstaScore.ai é um auditor estrutural independente e não possui vínculo, patrocínio ou afiliação oficial com o Instagram, Meta Inc. ou suas subsidiárias. Imagens são processadas temporariamente em memória e nunca salvas.
           </p>
         </div>
       </footer>

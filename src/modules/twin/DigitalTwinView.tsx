@@ -20,8 +20,18 @@ export function DigitalTwinView({ digitalTwin: rawTwin }: DigitalTwinViewProps) 
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-bold uppercase tracking-wider mb-2">
           <Fingerprint size={14} /> Gêmeo Digital (Módulo 1)
         </div>
-        <h1 className="text-3xl font-extrabold text-white tracking-tight">O Sistema Nunca Esquece</h1>
-        <p className="text-slate-400">Este é o seu modelo base. Cada interação, análise e resultado realimenta estes dados.</p>
+        <h1 className="text-3xl font-extrabold text-white tracking-tight">Modelo Estratégico do Perfil</h1>
+        <p className="text-slate-400">
+          Consolidação dos dados extraídos do perfil com diretrizes e baselines analíticos para guiar a execução.
+        </p>
+      </div>
+
+      {/* Nota de Transparência */}
+      <div className="p-4 bg-slate-900/60 border border-blue-500/20 rounded-2xl flex items-center gap-3 text-xs text-slate-300">
+        <Shield size={16} className="text-blue-400 shrink-0" />
+        <span>
+          <strong>Transparência Metodológica:</strong> Os campos de Bio, CTA e Identidade são extraídos da análise do perfil. Horários, frequências e taxas são <em>baselines e hipóteses estimadas</em> da metodologia C.A.G.E.
+        </span>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -86,13 +96,13 @@ export function DigitalTwinView({ digitalTwin: rawTwin }: DigitalTwinViewProps) 
                 <span className="text-xs text-slate-500 font-bold uppercase tracking-wider">CTA Principal</span>
                 <p className="text-sm text-slate-200 mt-1 font-mono bg-slate-800/50 px-2 py-1 rounded inline-block">{digitalTwin.content.currentCta}</p>
               </div>
-              <div className="flex gap-4">
+              <div className="flex flex-col sm:flex-row gap-4">
                 <div>
-                  <span className="text-xs text-slate-500 font-bold uppercase tracking-wider flex items-center gap-1"><Clock size={12}/> Horários</span>
+                  <span className="text-xs text-slate-500 font-bold uppercase tracking-wider flex items-center gap-1"><Clock size={12}/> Horários Sugeridos (Baseline)</span>
                   <p className="text-sm text-slate-200 mt-1">{digitalTwin.content.bestPostingTimes.join(", ")}</p>
                 </div>
                 <div>
-                  <span className="text-xs text-slate-500 font-bold uppercase tracking-wider flex items-center gap-1"><Repeat size={12}/> Frequência</span>
+                  <span className="text-xs text-slate-500 font-bold uppercase tracking-wider flex items-center gap-1"><Repeat size={12}/> Frequência Sugerida (Baseline)</span>
                   <p className="text-sm text-slate-200 mt-1">{digitalTwin.content.postingFrequency}</p>
                 </div>
               </div>
@@ -100,13 +110,13 @@ export function DigitalTwinView({ digitalTwin: rawTwin }: DigitalTwinViewProps) 
 
             <div className="space-y-4">
                <div>
-                  <span className="text-xs text-slate-500 font-bold uppercase tracking-wider flex items-center gap-1"><LayoutGrid size={12}/> Padrões de Feed</span>
+                  <span className="text-xs text-slate-500 font-bold uppercase tracking-wider flex items-center gap-1"><LayoutGrid size={12}/> Diretrizes de Feed (Sugeridas)</span>
                   <div className="flex flex-wrap gap-2 mt-2">
                     {digitalTwin.content.feedStrategyPatterns.map(p => <span key={p} className="px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-md text-xs text-emerald-400">{p}</span>)}
                   </div>
                </div>
                <div>
-                  <span className="text-xs text-slate-500 font-bold uppercase tracking-wider flex items-center gap-1"><PlaySquare size={12}/> Padrões de Reels</span>
+                  <span className="text-xs text-slate-500 font-bold uppercase tracking-wider flex items-center gap-1"><PlaySquare size={12}/> Diretrizes de Reels (Sugeridas)</span>
                   <div className="flex flex-wrap gap-2 mt-2">
                     {digitalTwin.content.reelsStrategyPatterns.map(p => <span key={p} className="px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-md text-xs text-emerald-400">{p}</span>)}
                   </div>
@@ -121,19 +131,20 @@ export function DigitalTwinView({ digitalTwin: rawTwin }: DigitalTwinViewProps) 
               <div className="w-10 h-10 rounded-full bg-violet-500/10 flex items-center justify-center text-violet-400">
                 <Brain size={20} />
               </div>
-              <h2 className="text-xl font-bold text-white">Memória & Conversão</h2>
+              <h2 className="text-xl font-bold text-white">Memória & Estimativas</h2>
            </div>
            
            <div className="space-y-4 mt-4">
              <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800">
-               <span className="text-xs text-slate-500 font-bold uppercase tracking-wider">Taxa de Conversão Atual</span>
+               <span className="text-xs text-slate-500 font-bold uppercase tracking-wider">Estimativa Baseline de Conversão</span>
                <div className="flex items-end gap-2 mt-1">
                  <span className="text-3xl font-black text-white">{digitalTwin.historyData.conversionRate}%</span>
+                 <span className="text-[11px] text-slate-400 mb-1">(Projeção Teórica C.A.G.E.)</span>
                </div>
              </div>
 
              <div>
-                <span className="text-xs text-slate-500 font-bold uppercase tracking-wider">Padrões Descobertos (AI)</span>
+                <span className="text-xs text-slate-500 font-bold uppercase tracking-wider">Hipóteses e Padrões Estruturais (IA)</span>
                 <ul className="mt-2 space-y-2">
                   {digitalTwin.content.discoveredPatterns.map(p => (
                     <li key={p} className="text-sm text-slate-300 flex items-start gap-2">

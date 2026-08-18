@@ -1,17 +1,21 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
-import { DiagnosisSchema } from "./src/schemas/diagnosis";
+import { DiagnosisSchema, DiagnosisRequestSchema } from "./src/schemas/diagnosis";
 import { calculateScoring, CRITERIA } from "./src/config/methodology";
 import { AI_MODEL_ROUTER, GEMINI_MODEL } from "./src/config/ai";
 import { generateStartModeStrategy } from "./src/engine/start-mode-generator";
+import { validateScreenshotBatch } from "./src/lib/image-validator";
 import { 
   getSubscription, 
   getUsage, 
   checkUserEntitlement, 
   checkAndIncrementQuota, 
+  refundQuota,
+  checkDistributedRateLimit,
   createCheckoutSessionServer,
   validateWebhookSignature,
   processWebhookEvent, 
@@ -25,6 +29,17 @@ import {
 import { PLANS, getPlanConfig } from "./src/config/plans";
 import { MissionService } from "./src/engine/missions/MissionService";
 import { StrategicBrainServer } from "./src/engine/strategic/StrategicBrainServer";
+import { 
+  requireAuth, 
+  requireAdmin, 
+  optionalAuth, 
+  getAuthenticatedUserId 
+} from "./src/server/auth";
+import {
+  exportUserData,
+  deleteUserData,
+  cleanupExpiredDocuments
+} from "./src/lib/data-retention";
 
 dotenv.config();
 
@@ -34,6 +49,9 @@ const PORT = 3000;
 // Increase request size limits to support base64 screenshot uploads (max 15MB)
 app.use(express.json({ limit: "15mb" }));
 app.use(express.urlencoded({ extended: true, limit: "15mb" }));
+
+// Mount global optional auth on /api routes to extract and verify tokens when present
+app.use("/api", optionalAuth);
 
 // Initialize Google GenAI securely (server-side only) with lazy initialization
 let aiInstance: GoogleGenAI | null = null;
@@ -76,10 +94,10 @@ app.get("/api/health", (req, res) => {
  */
 
 // 1. Get current subscription, plan config, and usage for user
-app.get("/api/subscription/status", (req, res) => {
-  const userId = (req.query.userId as string) || (req.headers["x-user-id"] as string) || "anonymous";
-  const sub = getSubscription(userId);
-  const usage = getUsage(userId);
+app.get("/api/subscription/status", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
+  const sub = await getSubscription(userId);
+  const usage = await getUsage(userId);
   const planConfig = getPlanConfig(sub.plan);
 
   return res.json({
@@ -92,12 +110,10 @@ app.get("/api/subscription/status", (req, res) => {
 });
 
 // 2. Create REAL checkout session (Mercado Pago / Stripe / Production Gateway)
-app.post("/api/checkout/create-session", async (req, res) => {
+app.post("/api/checkout/create-session", requireAuth, async (req, res) => {
   try {
-    const { userId, planId, cycle, paymentMethod, userEmail } = req.body;
-    if (!userId) {
-      return res.status(400).json({ success: false, error: "userId_required" });
-    }
+    const userId = req.user!.uid;
+    const { planId, cycle, paymentMethod, userEmail } = req.body;
 
     const appUrl = `${req.protocol}://${req.get('host')}`;
 
@@ -142,21 +158,24 @@ app.post("/api/checkout/create-session", async (req, res) => {
 
 // 3. Webhook endpoint for payment gateway events with SIGNATURE VALIDATION & IDEMPOTENCY
 app.post("/api/webhook/payment", async (req, res) => {
-  // Validate webhook secret/signature in production
-  const isSignatureValid = validateWebhookSignature(req.headers, req.body);
-  if (!isSignatureValid) {
-    console.warn("[InstaScore Webhook] Unauthorized or unauthenticated webhook signature rejected!");
-    return res.status(401).json({ success: false, error: "unauthorized_webhook_signature" });
+  // Validate webhook secret/signature with Fail-Closed posture
+  const validation = validateWebhookSignature(req.headers, req.body, req.query);
+  if (!validation.valid) {
+    console.warn(`[InstaScore Webhook] Validation failed (${validation.status} ${validation.error}): ${validation.message}`);
+    return res.status(validation.status).json({
+      success: false,
+      error: validation.error,
+      message: validation.message
+    });
   }
 
   // Parse webhook payload (Mercado Pago IPN & Webhooks)
-  let eventId = req.body.eventId || req.body.id || req.body.data?.id;
-  let userId = req.body.userId || req.body.metadata?.user_id || req.body.metadata?.userId || req.body.data?.metadata?.user_id;
+  let eventId = req.body.eventId || (req.body.id ? `mp_evt_${req.body.id}` : (req.body.data?.id ? `mp_evt_${req.body.data.id}` : undefined));
   let eventType = req.body.eventType || req.body.action || req.body.type || "payment.approved";
   let status = req.body.status || req.body.data?.status || "approved";
-  let cycle = req.body.cycle || req.body.metadata?.cycle;
+  let cycle = req.body.cycle;
   let provider = req.body.provider || "mercadopago";
-  let sessionId = req.body.sessionId || req.body.metadata?.session_id || req.body.metadata?.sessionId;
+  let sessionId = req.body.sessionId || req.body.data?.metadata?.session_id;
   const providerPaymentId = req.body.providerPaymentId || String(req.body.data?.id || req.body.id || "");
 
   // Handles Mercado Pago topic/IPN notifications
@@ -166,46 +185,51 @@ app.post("/api/webhook/payment", async (req, res) => {
   }
 
   if (!eventId) {
-    eventId = `evt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    eventId = `evt_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
   }
 
-  if (!userId && !providerPaymentId) {
-    // If notification without userId or paymentId directly in payload, respond 200 OK
-    return res.json({ success: true, message: "webhook_received_awaiting_details" });
-  }
-
-  console.log(`[InstaScore Webhook] Processing event '${eventType}' (${eventId}) for user '${userId || "lookup"}' with status '${status}'`);
+  console.log(`[InstaScore Webhook] Processing event '${eventType}' (${eventId}) for payment '${providerPaymentId || "N/A"}'`);
 
   const result = await processWebhookEvent({
     eventId,
     eventType,
-    userId: userId || "anonymous",
+    userId: req.body.userId, // Will be verified/overridden by server metadata in processWebhookEvent
     cycle: cycle === "annual" ? "annual" : "monthly",
-    status,
+    incomingStatus: status,
     provider,
     sessionId,
     providerPaymentId,
-    payload: req.body
+    payload: req.body,
+    headers: req.headers
   });
 
-  return res.json({
+  if (!result.success) {
+    return res.status(result.httpStatus || 400).json({
+      success: false,
+      reason: result.reason,
+      message: result.message
+    });
+  }
+
+  return res.status(result.httpStatus || 200).json({
     success: true,
-    idempotentProcessed: result.processed,
+    processed: result.processed,
     reason: result.reason,
+    message: result.message,
     subscription: result.subscription
   });
 });
 
 // 4. Poll status of checkout session (Real-Time Pix/Card Approval Auto-Detection)
-app.get("/api/checkout/status", (req, res) => {
+app.get("/api/checkout/status", requireAuth, async (req, res) => {
   const sessionId = req.query.sessionId as string;
-  const userId = (req.query.userId as string) || (req.headers["x-user-id"] as string) || "anonymous";
+  const userId = req.user!.uid;
 
   if (!sessionId) {
     return res.status(400).json({ success: false, error: "sessionId_required" });
   }
 
-  const result = getCheckoutSessionStatus(sessionId, userId);
+  const result = await getCheckoutSessionStatus(sessionId, userId);
   return res.json({
     success: true,
     ...result
@@ -213,11 +237,8 @@ app.get("/api/checkout/status", (req, res) => {
 });
 
 // 5. Cancel subscription route
-app.post("/api/subscription/cancel", async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) {
-    return res.status(400).json({ success: false, error: "userId_required" });
-  }
+app.post("/api/subscription/cancel", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
   const result = await cancelSubscriptionServer(userId);
   return res.json({
@@ -227,13 +248,86 @@ app.post("/api/subscription/cancel", async (req, res) => {
   });
 });
 
+/**
+ * PRIVACY, DATA MINIMIZATION & RETENTION LIFECYCLE ENDPOINTS
+ */
+
+// 6. User Data Export (Portability)
+app.get("/api/user/export-data", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.uid;
+    const exportResult = await exportUserData(userId);
+
+    // Set download headers for JSON portability
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename="instascore-data-export-${userId.substring(0, 8)}.json"`);
+    return res.json(exportResult);
+  } catch (err: any) {
+    console.error("[DataExport] Error exporting user data:", err.message || err);
+    return res.status(500).json({
+      success: false,
+      error: "DATA_EXPORT_FAILED",
+      message: "Falha ao gerar arquivo de exportação dos seus dados. Tente novamente."
+    });
+  }
+});
+
+// 7. User Data Deletion (Right to Erasure / Cascading Purge)
+app.delete("/api/user/delete-data", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.uid;
+    const deletionResult = await deleteUserData(userId);
+    return res.json(deletionResult);
+  } catch (err: any) {
+    console.error("[DataDeletion] Error deleting user data:", err.message || err);
+    return res.status(500).json({
+      success: false,
+      error: "DATA_DELETION_FAILED",
+      message: "Falha ao processar a exclusão de seus dados. Tente novamente."
+    });
+  }
+});
+
+app.post("/api/user/delete-data", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.uid;
+    const deletionResult = await deleteUserData(userId);
+    return res.json(deletionResult);
+  } catch (err: any) {
+    console.error("[DataDeletion] Error deleting user data:", err.message || err);
+    return res.status(500).json({
+      success: false,
+      error: "DATA_DELETION_FAILED",
+      message: "Falha ao processar a exclusão de seus dados. Tente novamente."
+    });
+  }
+});
+
+// 8. Admin automated cleanup of expired documents past retentionUntil
+app.post("/api/admin/cleanup-expired", requireAdmin, async (req, res) => {
+  try {
+    const cleanupResult = await cleanupExpiredDocuments();
+    return res.json({
+      success: true,
+      ...cleanupResult
+    });
+  } catch (err: any) {
+    console.error("[DataCleanup] Error running expired cleanup:", err.message || err);
+    return res.status(500).json({
+      success: false,
+      error: "CLEANUP_FAILED",
+      message: "Falha ao executar limpeza de dados expirados."
+    });
+  }
+});
+
 
 // 5. PRO AI Content Generator Endpoint (Protected by Content AI Entitlement)
-app.post("/api/generate-content", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/generate-content", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
   // Check entitlement
-  const entitlement = checkUserEntitlement(userId, "contentAi");
+  const entitlement = await checkUserEntitlement(userId, "contentAi");
   if (!entitlement.allowed) {
     return res.status(403).json({
       success: false,
@@ -244,7 +338,7 @@ app.post("/api/generate-content", async (req, res) => {
   }
 
   // Check Quota
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({
       success: false,
@@ -300,8 +394,8 @@ Retorne a resposta formatada de forma limpa em Markdown.`;
 });
 
 // 5.1 Mission Engine Real Execution & Bio AI Generator Endpoint
-app.post("/api/mission/execute", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/mission/execute", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
   const { 
     missionType, 
     criterionId, 
@@ -371,8 +465,8 @@ app.post("/api/mission/execute", async (req, res) => {
 });
 
 // 6. Real-time AI Mentor Chat Endpoint (Digital Twin Context Grounded)
-app.post("/api/mentor/chat", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/mentor/chat", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
   const { message, digitalTwin, diagnosisResult, history } = req.body;
 
   if (!message || typeof message !== "string" || !message.trim()) {
@@ -380,7 +474,7 @@ app.post("/api/mentor/chat", async (req, res) => {
   }
 
   // Quota check
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({
       success: false,
@@ -459,8 +553,8 @@ DIRETRIZES DA RESPOSTA:
 });
 
 // 7. Start Mode AI Strategy Generator Endpoint (Customized Naming, Bio, Pillars, Plan)
-app.post("/api/start-mode/generate", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/start-mode/generate", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
   const { projectIdea, objective } = req.body;
 
   if (!projectIdea || typeof projectIdea !== "string" || !projectIdea.trim()) {
@@ -468,7 +562,7 @@ app.post("/api/start-mode/generate", async (req, res) => {
   }
 
   // Quota check
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({
       success: false,
@@ -575,11 +669,11 @@ Retorne apenas JSON válido.`;
 });
 
 // 8. Simulator Bio & CTA AI Optimizer Endpoint
-app.post("/api/simulator/optimize", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/simulator/optimize", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
   const { currentBio, currentCta, niche, objective } = req.body;
 
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({
       success: false,
@@ -650,13 +744,44 @@ Retorne apenas JSON válido.`;
   }
 });
 
-// 9. Admin Observability Endpoint
-app.get("/api/admin/metrics", (req, res) => {
-  const metrics = getAdminMetrics();
+// 9. Admin Observability Endpoint (Protected: Admin Only)
+app.get("/api/admin/metrics", requireAdmin, async (req, res) => {
+  const metrics = await getAdminMetrics();
   return res.json({
     success: true,
     metrics
   });
+});
+
+// 9.1 User Feedback Submission Endpoint (Protected: Authenticated User)
+app.post("/api/feedback/submit", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.uid;
+    const { solutionType, rating, comment, itemTitle } = req.body;
+    if (!solutionType || !rating) {
+      return res.status(400).json({ success: false, error: "solutionType and rating are required." });
+    }
+    const record = await submitUserFeedback({
+      userId,
+      solutionType,
+      rating: rating === "useful" ? "useful" : "not_useful",
+      comment,
+      itemTitle
+    });
+    return res.json({ success: true, feedback: record });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: "FEEDBACK_SUBMIT_FAILED", message: err.message });
+  }
+});
+
+// 9.2 Admin Feedback Listing Endpoint (Protected: Admin Only)
+app.get("/api/feedback/list", requireAdmin, async (req, res) => {
+  try {
+    const records = await listFeedbackRecords();
+    return res.json({ success: true, feedback: records });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: "FEEDBACK_LIST_FAILED", message: err.message });
+  }
 });
 
 /**
@@ -666,10 +791,10 @@ app.get("/api/admin/metrics", (req, res) => {
  */
 
 // 10.1 PRO Reels Script Generator (Complete Hook, Script, Direction & Caption)
-app.post("/api/pro/reels-script", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/pro/reels-script", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
-  const entitlement = checkUserEntitlement(userId, "reelsGenerator");
+  const entitlement = await checkUserEntitlement(userId, "reelsGenerator");
   if (!entitlement.allowed) {
     return res.status(403).json({
       success: false,
@@ -679,7 +804,7 @@ app.post("/api/pro/reels-script", async (req, res) => {
     });
   }
 
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
   }
@@ -753,10 +878,10 @@ Retorne ESTRITAMENTE em formato JSON com a estrutura:
 });
 
 // 10.2 PRO Carousel Generator (Slide-by-Slide Visual & Text Structure)
-app.post("/api/pro/carousel", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/pro/carousel", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
-  const entitlement = checkUserEntitlement(userId, "carouselGenerator");
+  const entitlement = await checkUserEntitlement(userId, "carouselGenerator");
   if (!entitlement.allowed) {
     return res.status(403).json({
       success: false,
@@ -766,7 +891,7 @@ app.post("/api/pro/carousel", async (req, res) => {
     });
   }
 
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
   }
@@ -838,10 +963,10 @@ Retorne ESTRITAMENTE em JSON:
 });
 
 // 10.3 PRO High-Conversion Stories Sequence (5-Story Sales Funnel)
-app.post("/api/pro/stories-sequence", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/pro/stories-sequence", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
-  const entitlement = checkUserEntitlement(userId, "storiesGenerator");
+  const entitlement = await checkUserEntitlement(userId, "storiesGenerator");
   if (!entitlement.allowed) {
     return res.status(403).json({
       success: false,
@@ -851,7 +976,7 @@ app.post("/api/pro/stories-sequence", async (req, res) => {
     });
   }
 
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
   }
@@ -922,10 +1047,10 @@ Retorne ESTRITAMENTE em JSON:
 });
 
 // 10.4 PRO Positioning & Unique Differentiation Matrix
-app.post("/api/pro/positioning-strategy", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/pro/positioning-strategy", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
-  const entitlement = checkUserEntitlement(userId, "positioning_generation");
+  const entitlement = await checkUserEntitlement(userId, "positioning_generation");
   if (!entitlement.allowed) {
     return res.status(403).json({
       success: false,
@@ -935,7 +1060,7 @@ app.post("/api/pro/positioning-strategy", async (req, res) => {
     });
   }
 
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
   }
@@ -1001,10 +1126,10 @@ Retorne ESTRITAMENTE em JSON:
 });
 
 // 10.5 PRO Tactical 30-Day Content Calendar Generator
-app.post("/api/pro/tactical-calendar", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/pro/tactical-calendar", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
-  const entitlement = checkUserEntitlement(userId, "calendar_generation");
+  const entitlement = await checkUserEntitlement(userId, "calendar_generation");
   if (!entitlement.allowed) {
     return res.status(403).json({
       success: false,
@@ -1014,7 +1139,7 @@ app.post("/api/pro/tactical-calendar", async (req, res) => {
     });
   }
 
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
   }
@@ -1081,10 +1206,10 @@ Retorne ESTRITAMENTE em JSON:
 });
 
 // 10.6 PRO Visual Image Generation & Art Briefing (Imagen / Studio Asset Creation)
-app.post("/api/pro/generate-image", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/pro/generate-image", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
-  const entitlement = checkUserEntitlement(userId, "image_generation");
+  const entitlement = await checkUserEntitlement(userId, "image_generation");
   if (!entitlement.allowed) {
     return res.status(403).json({
       success: false,
@@ -1094,7 +1219,7 @@ app.post("/api/pro/generate-image", async (req, res) => {
     });
   }
 
-  const quota = checkAndIncrementQuota(userId, "IMAGE_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "IMAGE_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
   }
@@ -1150,15 +1275,15 @@ Retorne em JSON:
 });
 
 // 10.7 Feedback Submission API (👍 / 👎 on any solution)
-app.post("/api/feedback/submit", (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/feedback/submit", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
   const { solutionType, rating, comment, itemTitle } = req.body;
 
   if (!rating || (rating !== "useful" && rating !== "not_useful")) {
     return res.status(400).json({ success: false, error: "rating_invalid" });
   }
 
-  const record = submitUserFeedback({
+  const record = await submitUserFeedback({
     userId,
     solutionType: solutionType || "general",
     rating,
@@ -1173,10 +1298,10 @@ app.post("/api/feedback/submit", (req, res) => {
   });
 });
 
-// 10.8 Feedback List API
-app.get("/api/feedback/list", (req, res) => {
+// 10.8 Feedback List API (Protected: Admin Only)
+app.get("/api/feedback/list", requireAdmin, async (req, res) => {
   const limit = parseInt(req.query.limit as string) || 50;
-  const feedbacks = listFeedbackRecords(limit);
+  const feedbacks = await listFeedbackRecords(limit);
   return res.json({
     success: true,
     feedbacks
@@ -1190,10 +1315,10 @@ app.get("/api/feedback/list", (req, res) => {
  */
 
 // 11.1 Strategic Positioning Engine & Profile Clarity Score (0-100)
-app.post("/api/strategic/positioning", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/strategic/positioning", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
   }
@@ -1241,10 +1366,10 @@ app.post("/api/strategic/positioning", async (req, res) => {
 });
 
 // 11.2 Bio Strategy Engine (Authority, Conversion, Personality with anti-cliche)
-app.post("/api/strategic/bio", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/strategic/bio", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
   }
@@ -1286,10 +1411,10 @@ app.post("/api/strategic/bio", async (req, res) => {
 });
 
 // 11.3 Name Strategy Engine (Descritivo, Autoridade, Marca, Conceitual, Diferenciador)
-app.post("/api/strategic/naming", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/strategic/naming", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
   }
@@ -1327,10 +1452,10 @@ app.post("/api/strategic/naming", async (req, res) => {
 });
 
 // 11.4 Content Pillars & Dynamic Content DNA Engine
-app.post("/api/strategic/pillars", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/strategic/pillars", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
   }
@@ -1368,10 +1493,10 @@ app.post("/api/strategic/pillars", async (req, res) => {
 });
 
 // 11.5 Strategic Content Lab (Objective -> Target -> Pain -> Pillar -> Angle -> Format -> Content -> Quality Gate >= 75)
-app.post("/api/strategic/content-lab", async (req, res) => {
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+app.post("/api/strategic/content-lab", requireAuth, async (req, res) => {
+  const userId = req.user!.uid;
 
-  const entitlement = checkUserEntitlement(userId, "contentAi");
+  const entitlement = await checkUserEntitlement(userId, "contentAi");
   if (!entitlement.allowed) {
     return res.status(403).json({
       success: false,
@@ -1381,7 +1506,7 @@ app.post("/api/strategic/content-lab", async (req, res) => {
     });
   }
 
-  const quota = checkAndIncrementQuota(userId, "AI_GENERATION");
+  const quota = await checkAndIncrementQuota(userId, "AI_GENERATION");
   if (!quota.allowed) {
     return res.status(429).json({ success: false, error: quota.errorCode, message: quota.message });
   }
@@ -1845,11 +1970,15 @@ function checkRateLimit(ip: string): { allowed: boolean; remaining: number } {
   return { allowed: true, remaining: maxRequests - record.count };
 }
 
-app.post("/api/analyze", async (req, res) => {
+app.post("/api/analyze", requireAuth, async (req, res) => {
   const clientIp = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
-  const rateLimit = checkRateLimit(clientIp);
+  const userId = req.user!.uid;
+
+  // 1. Distributed Rate Limiting (Multi-Instance Compatible via Firestore / Store Lock)
+  const rateLimitKey = userId ? `user_${userId}` : `ip_${clientIp}`;
+  const rateLimit = await checkDistributedRateLimit(rateLimitKey, 10, 10 * 60 * 1000);
   if (!rateLimit.allowed) {
-    console.warn(`[InstaScore RateLimit] IP ${clientIp} exceeded limit`);
+    console.warn(`[InstaScore RateLimit] Key ${rateLimitKey} exceeded limit`);
     return res.status(429).json({
       success: false,
       error: "RATE_LIMIT_EXCEEDED",
@@ -1857,10 +1986,45 @@ app.post("/api/analyze", async (req, res) => {
     });
   }
 
-  const userId = req.body.userId || (req.headers["x-user-id"] as string) || "anonymous";
+  // 2. Strict Zod Payload Validation BEFORE touching quotas or AI
+  const payloadValidation = DiagnosisRequestSchema.safeParse(req.body);
+  if (!payloadValidation.success) {
+    const firstIssue = payloadValidation.error.issues[0];
+    return res.status(400).json({
+      success: false,
+      error: "INVALID_REQUEST_PAYLOAD",
+      message: firstIssue?.message || "Dados de formulário inválidos.",
+      issues: payloadValidation.error.issues.map(i => ({
+        path: i.path.join("."),
+        message: i.message
+      }))
+    });
+  }
 
-  // ENFORCE BACKEND QUOTA CHECK BEFORE INVOKING EXPENSIVE GEMINI API
-  const quotaCheck = checkAndIncrementQuota(userId, "DIAGNOSIS");
+  const { userName, niche, objective, targetAudience, handle, print1, print2, print3 } = payloadValidation.data;
+
+  // 3. Multi-Layer Image Security Validation (Magic Bytes, Dimensions, No SVG/HTML, Size Limits)
+  const imagesToValidate: { input: string; label: string }[] = [
+    { input: print1, label: "Captura Inicial (Print 1)" },
+    { input: print2, label: "Captura do Feed (Print 2)" }
+  ];
+  if (print3) {
+    imagesToValidate.push({ input: print3, label: "Captura de Insights (Print 3)" });
+  }
+
+  const imgBatchResult = validateScreenshotBatch(imagesToValidate);
+  if (!imgBatchResult.valid || imgBatchResult.validatedImages.length < 2) {
+    return res.status(400).json({
+      success: false,
+      error: imgBatchResult.error || "INVALID_IMAGE_PAYLOAD",
+      message: imgBatchResult.message || "As capturas de tela enviadas estão inválidas ou corrompidas."
+    });
+  }
+
+  const [img1, img2, img3] = imgBatchResult.validatedImages;
+
+  // 4. Atomic Quota Enforcement AFTER all cheap validations pass
+  const quotaCheck = await checkAndIncrementQuota(userId, "DIAGNOSIS");
   if (!quotaCheck.allowed) {
     console.warn(`[InstaScore Quota] User ${userId} blocked: ${quotaCheck.errorCode}`);
     return res.status(403).json({
@@ -1873,94 +2037,50 @@ app.post("/api/analyze", async (req, res) => {
     });
   }
 
-  console.log("[InstaScore] Request received from IP:", clientIp, "for user:", userId);
-  try {
-    const { userName, niche, objective, targetAudience, handle, print1, print2, print3, consent } = req.body;
+  // Safe sanitized logging (NEVER log base64 data, prompt text, or tokens)
+  console.log(`[InstaScore] Request validated: user=${userId}, ip=${clientIp}, imagesCount=${imgBatchResult.validatedImages.length}, totalSizeKb=${Math.round(imgBatchResult.totalSizeBytes / 1024)}`);
 
-    // Validate request inputs before calling Gemini API
-    if (!consent) {
-      return res.status(400).json({
-        success: false,
-        error: " É necessário autorizar o processamento temporário das imagens para gerar o diagnóstico."
-      });
+  const apiKeyToCheck = process.env.GEMINI_API_KEY;
+  if (!apiKeyToCheck) {
+    console.warn("[InstaScore] API Key is missing");
+    // Restitute quota on server configuration error
+    await refundQuota(userId, "DIAGNOSIS");
+    return res.status(500).json({
+      success: false,
+      error: "API_KEY_MISSING",
+      message: "A configuração da inteligência artificial está incompleta."
+    });
+  }
+
+  // Build the parts array for the Gemini Multimodal prompt
+  const parts: any[] = [];
+
+  // Add validated screenshot inline data
+  parts.push({
+    inlineData: {
+      mimeType: img1.mimeType,
+      data: img1.data
     }
+  });
 
-    if (!userName || !userName.trim()) {
-      return res.status(400).json({ success: false, error: "Precisamos saber como gostaria de ser chamado." });
+  parts.push({
+    inlineData: {
+      mimeType: img2.mimeType,
+      data: img2.data
     }
+  });
 
-    if (!niche || !niche.trim()) {
-      return res.status(400).json({ success: false, error: "Precisamos saber qual é o seu negócio ou nicho." });
-    }
-
-    if (!objective || !objective.trim()) {
-      return res.status(400).json({ success: false, error: "Precisamos saber qual é seu principal objetivo no Instagram." });
-    }
-
-    if (!targetAudience || !targetAudience.trim()) {
-      return res.status(400).json({ success: false, error: "Precisamos saber quem é o público que você quer alcançar." });
-    }
-
-    if (!print1) {
-      return res.status(400).json({ success: false, error: "Precisamos da captura de tela inicial do perfil (Print 1)." });
-    }
-
-    if (!print2) {
-      return res.status(400).json({ success: false, error: "Precisamos da captura de tela do topo do feed (Print 2)." });
-    }
-
-    const img1 = parseBase64Image(print1);
-    if (!img1) {
-      return res.status(400).json({ success: false, error: "A imagem da captura inicial (Print 1) está inválida ou ilegível." });
-    }
-
-    const img2 = parseBase64Image(print2);
-    if (!img2) {
-      return res.status(400).json({ success: false, error: "A imagem do topo do feed (Print 2) está inválida ou ilegível." });
-    }
-
-    const img3 = print3 ? parseBase64Image(print3) : null;
-    console.log("[InstaScore] Uploads validated");
-
-    const apiKeyToCheck = process.env.GEMINI_API_KEY;
-    if (!apiKeyToCheck) {
-      console.warn("[InstaScore] API Key is missing");
-      return res.status(500).json({
-        success: false,
-        error: "API_KEY_MISSING",
-        message: "A configuração da inteligência artificial está incompleta."
-      });
-    }
-
-    // Build the parts array for the Gemini Multimodal prompt
-    const parts: any[] = [];
-
-    // Add screenshots
+  if (img3) {
     parts.push({
       inlineData: {
-        mimeType: img1.mimeType,
-        data: img1.data
+        mimeType: img3.mimeType,
+        data: img3.data
       }
     });
+  }
 
-    parts.push({
-      inlineData: {
-        mimeType: img2.mimeType,
-        data: img2.data
-      }
-    });
-
-    if (img3) {
-      parts.push({
-        inlineData: {
-          mimeType: img3.mimeType,
-          data: img3.data
-        }
-      });
-    }
-
-    // Context-rich strategic text prompt
-    const contextPrompt = `Aqui estão as capturas de tela do perfil do Instagram de ${userName} (@${handle || "Não informado"}).
+  // Context-rich strategic text prompt (Sanitized lengths enforced by Zod)
+  const contextPrompt = `Aqui estão as capturas de tela do perfil do Instagram de ${userName} (@${handle || "Não informado"}).
 Nicho/Negócio do usuário: "${niche}"
 Objetivo Principal no Instagram: "${objective}"
 Público Alvo Desejado: "${targetAudience}"
@@ -1972,163 +2092,164 @@ ${img3 ? "3. O Print 3 mostra estatísticas adicionais (Insights) para contexto 
 
 Por favor, analise as capturas e preencha todos os 25 critérios obrigatórios da nossa metodologia de auditoria. Lembre-se de avaliar TODOS os 25 critérios do seu SYSTEM INSTRUCTION sem omitir nenhum ID de critério! Atribua notas inteiras de 0 a 4 (ou null se for totalmente impossível identificar qualquer evidência para aquele critério). Retorne os dados em formato JSON estrito conforme o esquema fornecido.`;
 
-    parts.push({ text: contextPrompt });
+  parts.push({ text: contextPrompt });
 
-    // Unique request trace ID for observability
-    const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  // Unique request trace ID for observability
+  const requestId = `req_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
 
-    // Execute analysis pipeline with Zod validation, retry, and fallback
-    let pipelineResult: { parsedDiagnosis: any; meta: AIExecutionMeta };
-    try {
-      pipelineResult = await executeAnalysisPipeline({
-        parts,
-        systemInstruction: SYSTEM_INSTRUCTION,
-        responseSchema: GEMINI_RESPONSE_SCHEMA,
-        requestId
-      });
-    } catch (pipelineErr: any) {
-      console.error(`[InstaScore Pipeline] [${requestId}] Execution error:`, pipelineErr.message || pipelineErr);
-      
-      if (pipelineErr.code === "ANALYSIS_VALIDATION_FAILED") {
-        return res.status(422).json({
-          success: false,
-          error: "ANALYSIS_VALIDATION_FAILED",
-          message: "Não conseguimos concluir esta análise agora. Seus dados não foram perdidos. Tente novamente em alguns instantes.",
-          diagnostic_info: {
-            requestId,
-            stage: "structured_output_validation",
-            modelUsed: pipelineErr.meta?.modelUsed,
-            totalCalls: pipelineErr.meta?.totalCalls,
-            fallbackUsed: pipelineErr.meta?.fallbackUsed,
-            issues: pipelineErr.meta?.validationIssues
-          }
-        });
-      }
+  // Execute analysis pipeline with Zod validation, retry, and fallback
+  let pipelineResult: { parsedDiagnosis: any; meta: AIExecutionMeta };
+  try {
+    pipelineResult = await executeAnalysisPipeline({
+      parts,
+      systemInstruction: SYSTEM_INSTRUCTION,
+      responseSchema: GEMINI_RESPONSE_SCHEMA,
+      requestId
+    });
+  } catch (pipelineErr: any) {
+    console.error(`[InstaScore Pipeline] [${requestId}] Execution error:`, pipelineErr.message || pipelineErr);
+    
+    // Fail-safe quota refund policy: restore user quota on AI execution failure
+    await refundQuota(userId, "DIAGNOSIS");
 
-      return res.status(500).json({
+    if (pipelineErr.code === "ANALYSIS_VALIDATION_FAILED") {
+      return res.status(422).json({
         success: false,
-        error: "ANALYSIS_FAILED",
-        message: "Ocorreu uma instabilidade temporária no processamento da IA. Tente novamente em instantes.",
-        requestId
-      });
-    }
-
-    const { parsedDiagnosis, meta: aiExecutionMeta } = pipelineResult;
-
-    // Run mathematical calculations in backend (AI must NEVER calculate scores)
-    const evaluations = parsedDiagnosis.evaluations;
-
-    // Ensure all 25 criteria are present in evaluations array
-    const criteriaIdsInResponse = new Set(evaluations.map((e: any) => e.criterion_id));
-    for (const criterion of CRITERIA) {
-      if (!criteriaIdsInResponse.has(criterion.id)) {
-        evaluations.push({
-          criterion_id: criterion.id,
-          grade: null,
-          confidence: 0,
-          evidence: "Informação não visível ou ausente nas capturas enviadas.",
-          justification: "Critério não identificado nas evidências disponíveis."
-        });
-      }
-    }
-
-    // Deterministic Math Engine scoring calculation
-    const scoringResult = calculateScoring(evaluations, objective);
-    console.log(`[InstaScore Pipeline] [${requestId}] Deterministic Math Engine calculated score=${scoringResult.score}, coverage=${scoringResult.coverage}%`);
-
-
-    // TEST 3: Invalid images & data sufficiency check
-    if (!parsedDiagnosis.metadata?.is_data_sufficient || scoringResult.coverage < 15) {
-      const missingReason = (parsedDiagnosis.metadata?.missing_elements && parsedDiagnosis.metadata.missing_elements.length > 0)
-        ? parsedDiagnosis.metadata.missing_elements.join("; ")
-        : "Não foram encontradas evidências de um perfil do Instagram nas imagens enviadas.";
-      console.warn("[InstaScore] Invalid or insufficient image data detected:", missingReason);
-      return res.status(400).json({
-        success: false,
-        error: "IMAGEM_INVALIDA_OU_INSUFICIENTE",
-        message: `As imagens enviadas não parecem conter as informações de um perfil do Instagram visível. ${missingReason}`,
-        missing_elements: parsedDiagnosis.metadata?.missing_elements || []
-      });
-    }
-
-    // TEST 6: Priority alignment - ensure tomorrow_action and recommended_actions follow math engine
-    const { getPrioritizedActions } = await import("./src/config/methodology");
-    const prioritized = getPrioritizedActions(evaluations, objective);
-    if (prioritized.length > 0) {
-      const top1Id = prioritized[0].criterion_id;
-      if (parsedDiagnosis.tomorrow_action && parsedDiagnosis.tomorrow_action.criterion_id !== top1Id) {
-        const matchingAction = parsedDiagnosis.recommended_actions?.find((a: any) => a.criterion_id === top1Id);
-        if (matchingAction) {
-          parsedDiagnosis.tomorrow_action = {
-            criterion_id: top1Id,
-            title: matchingAction.title,
-            instruction: matchingAction.instruction
-          };
-        } else {
-          parsedDiagnosis.tomorrow_action.criterion_id = top1Id;
+        error: "ANALYSIS_VALIDATION_FAILED",
+        message: "Não conseguimos concluir esta análise agora. Seus dados e sua quota não foram perdidos. Tente novamente em alguns instantes.",
+        diagnostic_info: {
+          requestId,
+          stage: "structured_output_validation",
+          modelUsed: pipelineErr.meta?.modelUsed,
+          totalCalls: pipelineErr.meta?.totalCalls,
+          fallbackUsed: pipelineErr.meta?.fallbackUsed,
+          issues: pipelineErr.meta?.validationIssues
         }
-      }
-
-      // Sort recommended actions according to priority score order
-      const priorityOrderMap = new Map<string, number>();
-      prioritized.forEach((p, idx) => priorityOrderMap.set(p.criterion_id, idx));
-      if (parsedDiagnosis.recommended_actions) {
-        parsedDiagnosis.recommended_actions.sort((a: any, b: any) => {
-          const orderA = priorityOrderMap.has(a.criterion_id) ? priorityOrderMap.get(a.criterion_id)! : 99;
-          const orderB = priorityOrderMap.has(b.criterion_id) ? priorityOrderMap.get(b.criterion_id)! : 99;
-          return orderA - orderB;
-        });
-      }
+      });
     }
 
-    // TEST 13: Complete Observability Metadata
-    const diagnosticId = `diag_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const fullMeta = {
-      diagnosticId,
-      modelUsed: aiExecutionMeta?.modelUsed || AI_MODEL_ROUTER.primaryModel,
-      totalCalls: aiExecutionMeta?.totalCalls || 1,
-      retries: aiExecutionMeta?.retries || 0,
-      fallbackUsed: aiExecutionMeta?.fallbackUsed || false,
-      durationMs: aiExecutionMeta?.durationMs || 0,
-      status: "success",
-      validationStatus: "valid",
-      coverage: scoringResult.coverage,
-      score: scoringResult.score,
-      methodologyVersion: parsedDiagnosis.methodology_version,
-      promptVersion: "1.0.0"
-    };
-
-    // Log AI execution cost for Observability
-    logAiExecutionCost({
-      userId,
-      diagnosticId,
-      action: "diagnosis_multimodal",
-      modelUsed: aiExecutionMeta?.modelUsed || AI_MODEL_ROUTER.primaryModel,
-      durationMs: aiExecutionMeta?.durationMs || 0,
-      retries: aiExecutionMeta?.retries || 0,
-      fallbackUsed: aiExecutionMeta?.fallbackUsed || false,
-      inputTokens: 2400,
-      outputTokens: 1900
-    });
-
-    console.log("[InstaScore Observability]", JSON.stringify(fullMeta));
-
-    return res.json({
-      success: true,
-      diagnosis: parsedDiagnosis,
-      scoring: scoringResult,
-      meta: fullMeta
-    });
-
-  } catch (error: any) {
-    console.error("[InstaScore] Error in /api/analyze route handler:", error);
     return res.status(500).json({
       success: false,
       error: "ANALYSIS_FAILED",
-      message: error.message || "Não foi possível concluir o diagnóstico.",
-      stage: "unknown"
+      message: "Ocorreu uma instabilidade temporária no processamento da IA. Sua quota foi preservada. Tente novamente em instantes.",
+      requestId
     });
   }
+
+  const { parsedDiagnosis, meta: aiExecutionMeta } = pipelineResult;
+
+  // Run mathematical calculations in backend (AI must NEVER calculate scores)
+  const evaluations = parsedDiagnosis.evaluations;
+
+  // Ensure all 25 criteria are present in evaluations array
+  const criteriaIdsInResponse = new Set(evaluations.map((e: any) => e.criterion_id));
+  for (const criterion of CRITERIA) {
+    if (!criteriaIdsInResponse.has(criterion.id)) {
+      evaluations.push({
+        criterion_id: criterion.id,
+        grade: null,
+        confidence: 0,
+        evidence: "Informação não visível ou ausente nas capturas enviadas.",
+        justification: "Critério não identificado nas evidências disponíveis.",
+        epistemic_layer: {
+          evidence: "evidência_observada",
+          justification: "inferência_técnica",
+          grade: "inferência_técnica"
+        }
+      });
+    }
+  }
+
+  // Deterministic Math Engine scoring calculation
+  const scoringResult = calculateScoring(evaluations, objective);
+  console.log(`[InstaScore Pipeline] [${requestId}] Math Engine score=${scoringResult.score}, coverage=${scoringResult.coverage}%`);
+
+  // Data sufficiency check
+  if (!parsedDiagnosis.metadata?.is_data_sufficient || scoringResult.coverage < 15) {
+    const missingReason = (parsedDiagnosis.metadata?.missing_elements && parsedDiagnosis.metadata.missing_elements.length > 0)
+      ? parsedDiagnosis.metadata.missing_elements.join("; ")
+      : "Não foram encontradas evidências de um perfil do Instagram nas imagens enviadas.";
+    console.warn(`[InstaScore] [${requestId}] Insufficient image data detected: ${missingReason}`);
+
+    // Restitute quota if uploaded image was unreadable as a profile
+    await refundQuota(userId, "DIAGNOSIS");
+
+    return res.status(400).json({
+      success: false,
+      error: "IMAGEM_INVALIDA_OU_INSUFICIENTE",
+      message: `As imagens enviadas não parecem conter as informações de um perfil do Instagram visível. ${missingReason}`,
+      missing_elements: parsedDiagnosis.metadata?.missing_elements || []
+    });
+  }
+
+  // Priority alignment - ensure tomorrow_action and recommended_actions follow math engine
+  const { getPrioritizedActions } = await import("./src/config/methodology");
+  const prioritized = getPrioritizedActions(evaluations, objective);
+  if (prioritized.length > 0) {
+    const top1Id = prioritized[0].criterion_id;
+    if (parsedDiagnosis.tomorrow_action && parsedDiagnosis.tomorrow_action.criterion_id !== top1Id) {
+      const matchingAction = parsedDiagnosis.recommended_actions?.find((a: any) => a.criterion_id === top1Id);
+      if (matchingAction) {
+        parsedDiagnosis.tomorrow_action = {
+          criterion_id: top1Id,
+          title: matchingAction.title,
+          instruction: matchingAction.instruction,
+          epistemic_layer: "simulação_projetiva"
+        };
+      } else {
+        parsedDiagnosis.tomorrow_action.criterion_id = top1Id;
+        parsedDiagnosis.tomorrow_action.epistemic_layer = "simulação_projetiva";
+      }
+    }
+
+    // Sort recommended actions according to priority score order
+    const priorityOrderMap = new Map<string, number>();
+    prioritized.forEach((p, idx) => priorityOrderMap.set(p.criterion_id, idx));
+    if (parsedDiagnosis.recommended_actions) {
+      parsedDiagnosis.recommended_actions.sort((a: any, b: any) => {
+        const orderA = priorityOrderMap.has(a.criterion_id) ? priorityOrderMap.get(a.criterion_id)! : 99;
+        const orderB = priorityOrderMap.has(b.criterion_id) ? priorityOrderMap.get(b.criterion_id)! : 99;
+        return orderA - orderB;
+      });
+    }
+  }
+
+  // Complete Observability Metadata
+  const diagnosticId = `diag_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+  const fullMeta = {
+    diagnosticId,
+    modelUsed: aiExecutionMeta?.modelUsed || AI_MODEL_ROUTER.primaryModel,
+    totalCalls: aiExecutionMeta?.totalCalls || 1,
+    retries: aiExecutionMeta?.retries || 0,
+    fallbackUsed: aiExecutionMeta?.fallbackUsed || false,
+    durationMs: aiExecutionMeta?.durationMs || 0,
+    status: "success",
+    validationStatus: "valid",
+    coverage: scoringResult.coverage,
+    score: scoringResult.score,
+    methodologyVersion: parsedDiagnosis.methodology_version,
+    promptVersion: "1.0.0"
+  };
+
+  // Log AI execution cost for Observability (Sanitized, No PII, No raw prompts)
+  logAiExecutionCost({
+    userId,
+    diagnosticId,
+    action: "diagnosis_multimodal",
+    modelUsed: aiExecutionMeta?.modelUsed || AI_MODEL_ROUTER.primaryModel,
+    durationMs: aiExecutionMeta?.durationMs || 0,
+    retries: aiExecutionMeta?.retries || 0,
+    fallbackUsed: aiExecutionMeta?.fallbackUsed || false,
+    inputTokens: 2400,
+    outputTokens: 1900
+  });
+
+  return res.json({
+    success: true,
+    diagnosis: parsedDiagnosis,
+    scoring: scoringResult,
+    meta: fullMeta
+  });
 });
 
 // Vite + Express Setup for Dev/Production

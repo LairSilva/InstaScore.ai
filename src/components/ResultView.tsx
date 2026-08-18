@@ -361,7 +361,7 @@ export function ResultView({
 
           <div className="mt-6 pt-4 border-t border-white/10">
              <p className="text-xs text-slate-300 leading-relaxed max-w-xs">
-                Seu perfil possui <strong className="text-white">potencial inexplorado</strong>. Atualmente você deixa cerca de <strong className="text-[#FF5E36] font-bold">{wastedPotential}%</strong> do alcance e conversão na mesa.
+                Espaço para otimização estrutural de até <strong className="text-[#FF5E36] font-bold">{wastedPotential} pontos</strong> de acordo com a matriz de critérios da metodologia C.A.G.E.
              </p>
           </div>
         </div>
@@ -411,10 +411,10 @@ export function ResultView({
           {/* Evolution Projection Card */}
           <div className="glass-panel rounded-3xl p-6 border border-white/10 bg-gradient-to-r from-[#120924]/80 to-[#1D0C3A]/80">
             <h3 className="text-xs font-extrabold text-[#FA26A0] tracking-widest uppercase mb-3 flex items-center gap-2 font-mono">
-              <TrendingUp size={16} /> Projeção de Evolução V6
+              <TrendingUp size={16} /> Simulação de Score Alvo (Projeção Matemática)
             </h3>
             <p className="text-xs text-slate-300 mb-5 leading-relaxed">
-              Ao aplicar as correções táticas recomendadas, a projeção do algoritmo indica atingimento de:
+              Simulação matemática do score potencial ao implementar as 5 ações prioritárias de conformidade estrutural:
             </p>
             
             <div className="flex items-center justify-between bg-[#080B14]/70 p-4 rounded-2xl border border-white/10">
@@ -426,10 +426,13 @@ export function ResultView({
                  <ArrowRight size={22} className="text-[#FF5E36]" />
                </div>
                <div className="text-center">
-                 <span className="block text-[10px] text-[#FA26A0] uppercase tracking-wider mb-1 font-mono font-bold">Meta Estimada</span>
+                 <span className="block text-[10px] text-[#FA26A0] uppercase tracking-wider mb-1 font-mono font-bold">Score Alvo Simulado</span>
                  <span className="text-3xl font-black text-white font-display">{scoring.targetScore || currentScore + 18}</span>
                </div>
             </div>
+            <p className="text-[10px] text-slate-400 mt-3 font-mono">
+              * O Score Alvo é uma simulação matemática de conformidade com a metodologia C.A.G.E. e não representa garantia de alcance, seguidores ou vendas.
+            </p>
           </div>
 
         </div>

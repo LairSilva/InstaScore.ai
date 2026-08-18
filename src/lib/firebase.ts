@@ -94,17 +94,23 @@ export function sanitizeId(rawId: string): string {
   return (sanitized || `id_${Date.now()}`).substring(0, 120);
 }
 
+import { calculateRetentionUntil, RETENTION_POLICIES } from './data-retention-client';
+
 // Helpers for persisting audits and start mode projects
 export async function saveDiagnosisToFirestore(diagnosisData: any, userId?: string) {
   const uid = userId || auth.currentUser?.uid || (await ensureAuthUser());
-  const rawId = diagnosisData.id || `diag_${Date.now()}`;
+  const rawId = diagnosisData.id || diagnosisData.meta?.diagnosticId || `diag_${Date.now()}`;
   const docId = sanitizeId(rawId);
   const docRef = doc(db, 'diagnoses', docId);
   
+  // Security & Minimization: ensure no raw base64 images exist in the persisted document
+  const { print1, print2, print3, ...sanitizedData } = diagnosisData;
+
   const payload = {
-    ...diagnosisData,
+    ...sanitizedData,
     id: docId,
     userId: uid,
+    retentionUntil: calculateRetentionUntil(RETENTION_POLICIES.DIAGNOSIS_DAYS),
     updatedAt: new Date().toISOString()
   };
 
@@ -126,6 +132,7 @@ export async function saveStartProjectToFirestore(projectData: any, userId?: str
     ...projectData,
     id: docId,
     userId: uid,
+    retentionUntil: calculateRetentionUntil(RETENTION_POLICIES.START_PROJECT_DAYS),
     updatedAt: new Date().toISOString()
   };
 
@@ -147,6 +154,7 @@ export async function saveDigitalTwinToFirestore(twinData: any, userId?: string)
     ...twinData,
     id: docId,
     userId: uid,
+    retentionUntil: calculateRetentionUntil(RETENTION_POLICIES.DIGITAL_TWIN_DAYS),
     updatedAt: new Date().toISOString()
   };
 
